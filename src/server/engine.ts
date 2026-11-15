@@ -23,6 +23,7 @@ import { encodeGroups, groupPixels, packDatagrams, type SentGroup } from './grou
 import { decide, type Action, type Decision, type Held } from './lifecycle.js';
 import { groupLooks, isVisible, plan, type GroupLook, type PlanResult } from './plan.js';
 import * as proto from './protocol.js';
+import { describeSegmentFrame } from './transport.js';
 import type { Store, StoreEvent } from './store.js';
 import type { Transport } from './transport.js';
 
@@ -367,8 +368,10 @@ export class Engine extends EventEmitter<{
     if (c.error) c.mode = 'error';
 
     this.emit('frame', d.id, preview, realWhite);
-    if (c.mode !== prev.mode || c.error !== prev.error || c.reason !== prev.reason || c.detail?.join('\n') !== prev.detail)
+    if (c.mode !== prev.mode || c.error !== prev.error || c.reason !== prev.reason || c.detail?.join('\n') !== prev.detail) {
+      this.log.debug({ device: d.name, mode: c.mode, reason: c.reason, detail: c.detail, error: c.error }, 'mode');
       this.emit('status', d.id, this.status(d.id));
+    }
 
     if (this.stopped) return;
     const fast = fading || !!ov?.animated;
@@ -394,6 +397,7 @@ export class Engine extends EventEmitter<{
   private async sendGroups(d: Device, c: Controller, looks: GroupLook[], full: boolean): Promise<boolean> {
     const { frames, sent } = encodeGroups(looks, full ? [] : c.sentGroups, d.whiteBalance);
     c.sentGroups = sent;
+    if (frames.length) this.log.debug({ ip: c.ip, groups: frames.map(describeSegmentFrame).join(' · '), full }, 'group frames');
     let ok = true;
     for (const datagram of packDatagrams(frames)) ok = (await this.send(c.ip, datagram, c)) && ok;
     if (!ok) c.sentGroups = []; // unknown: send everything next time
