@@ -30,28 +30,29 @@ settings, and the UI always says which method is active and why.
 
 ## 1. Assumptions
 
-| ID | Assumption | Probe | If false |
+| ID | Assumption | Test | If false |
 |---|---|---|---|
-| A1 | The H805A accepts `ptReal` over LAN (UDP 4003, LAN Control on). | P1 | Feature dead; stop. |
-| A2 | Color frame `33 05 15 01 RR GG BB KH KL TR TG TB <mask>`, mask little-endian from byte 12, bit *n* = segment *n*. | P2, P3 | Find the real layout with `seg raw` / `--mask-order`; only the encoder changes. |
-| A3 | Kelvin ≠ 0 lights the **dedicated white LEDs** (RGB/tint ignored or harmless). | P4 | Segments lose the white advantage; keep the feature only for holding state on its own, or drop it. |
-| A4 | Kelvin = 0 with RGB sets an RGB color on the segment. | P5 | RGB lights always use per-LED; segment mode only for `ct`/white defaults. |
-| A5 | `33 05 15 02 <0-100> <mask>` sets brightness per segment, for both RGB and white. | P6 | RGB: dim by scaling RGB. White: segment mode only when every lit segment shares one brightness (use the LAN `brightness` command); otherwise per-LED. |
-| A6 | A segment can be turned fully off (RGB 0 + kelvin 0, or brightness 0). | P7 | Off segments need per-LED → segment mode only when every segment is lit. Unlikely to be acceptable. |
-| A7 | Several BLE frames in one `ptReal` datagram all apply, in order; up to at least 8 frames. | P8 | One frame per datagram (paced 15 ms) → slower updates; raise the step interval. |
-| A8 | Segment updates are applied without the firmware's own fade, at ≥ 10 updates/s without drops. | P9 | Step interval = measured rate. If firmware fades itself, use it and skip stepping. |
-| A9 | The strip holds the segment state indefinitely, with no revert timer. | P10 | Add a refresh at the measured period. |
-| A10 | A segment command ends a running app scene/effect. | P11 | Send a static mode command first (find via `seg raw`). |
-| A11 | Switching between modes (`B1 01` / `B1 00` ↔ segment frames) shows no more than one stale frame. | P12 | Add a minimum dwell (e.g. 5 s) before switching back to segments; never switch while something is visible if a flash is reliable. |
-| A12 | Segment frames sent while razer is enabled are ignored, so a switch must disable first. | P12 | If they apply, nothing breaks; we still disable first. |
-| A13 | The LAN `brightness` command scales segment brightness too; pinned at 100 it's neutral. | P13 | Don't pin brightness in segment mode. |
-| A14 | Segments split the LEDs evenly; the count matches the Govee app. | P14 | Add editable segment boundaries (layout becomes a list of ranges). |
-| A15 | Segment frames sent while the strip is powered off are stored and shown at `turn on` (no flash of the old state). | P15 | Turn on first, then send frames; accept a short flash, or send all-off before every `turn off` (we do that anyway, see §3.4). |
-| A16 | Re-sending identical segment state causes no visible change. | P16 | Only resend on change, plus a slow refresh. |
-| A17 | Supported kelvin range (expected ~2000–9000 K; HA range 2000–6535 K). | P17 | Clamp, and advertise the measured range in HA discovery. |
-| A18 | After a power cycle the strip comes back showing its last segment state (or off), and accepts segment frames again without re-entry. | P18 | Re-send the full state on every refresh (we do anyway). |
-| A19 | Segment count ≤ 56 (fits a 7-byte mask). | P14 | Investigate a wider mask variant. |
+| A1 | The H805A accepts `ptReal` over LAN (UDP 4003, LAN Control on). | T1 | Feature dead; stop. |
+| A2 | Color frame `33 05 15 01 RR GG BB KH KL TR TG TB <mask>`, mask little-endian from byte 12, bit *n* = segment *n*. | T1 | Find the real layout with `seg raw` / `--mask-bytes` / `--msb`; only the encoder changes. |
+| A3 | Kelvin ≠ 0 lights the **dedicated white LEDs** (RGB/tint ignored or harmless). | T2a, T3 | Segments lose the white advantage; keep the feature only for holding state on its own, or drop it. |
+| A4 | Kelvin = 0 with RGB sets an RGB color on the segment. | T3 | RGB lights always use per-LED; segment mode only for `ct`/white defaults. |
+| A5 | `33 05 15 02 <0-100> <mask>` sets brightness per segment, for both RGB and white. | T2a | RGB: dim by scaling RGB. White: segment mode only when every lit segment shares one brightness (use the LAN `brightness` command); otherwise per-LED. |
+| A6 | A segment can be turned fully off (RGB 0 + kelvin 0, or brightness 0). | T2b | Off segments need per-LED → segment mode only when every segment is lit. Unlikely to be acceptable. |
+| A7 | Several BLE frames in one `ptReal` datagram all apply, in order (the probe sends 6 at once; the service packs up to 8). | T1 | One frame per datagram (paced 15 ms) → slower updates; raise the step interval. |
+| A8 | Segment updates are applied without the firmware's own fade, at ≥ 10 updates/s without drops. | T4a | Step interval = measured rate. If firmware fades itself, use it and skip stepping. |
+| A9 | The strip holds the segment state indefinitely, with no revert timer. | T5b | Add a refresh at the measured period. |
+| A10 | A segment command ends a running app scene/effect. | H10 | Send a static mode command first (find via `seg raw`). |
+| A11 | Switching between modes (`B1 01` / `B1 00` ↔ segment frames) shows no more than one stale frame. | T4b | Add a minimum dwell (e.g. 5 s) before switching back to segments; never switch while something is visible if a flash is reliable. |
+| A12 | Segment frames sent while razer is enabled are ignored, so a switch must disable first. | T4b | If they apply, nothing breaks; we still disable first. |
+| A13 | The LAN `brightness` command scales segment brightness too; pinned at 100 it's neutral. | H2 | Don't pin brightness in segment mode. |
+| A14 | Segments split the LEDs evenly; the count matches the Govee app. | T1 | Add editable segment boundaries (layout becomes a list of ranges). |
+| A15 | Segment frames sent while the strip is powered off are stored and shown at `turn on` (no flash of the old state). | T5a | Turn on first, then send frames; accept a short flash, or send all-off before every `turn off` (we do that anyway, see §3.4). |
+| A16 | Re-sending identical segment state causes no visible change. | H5 | Only resend on change, plus a slow refresh. |
+| A17 | Supported kelvin range (expected ~2000–9000 K; HA range 2000–6535 K). | T3 (range: H1) | Clamp, and advertise the measured range in HA discovery. |
+| A18 | After a power cycle the strip comes back showing its last segment state (or off), and accepts segment frames again without re-entry. | H11 | Re-send the full state on every refresh (we do anyway). |
+| A19 | Segment count ≤ 56 (fits a 7-byte mask). Resolved: the strip has 5. | — | Investigate a wider mask variant. |
 
+Test IDs: T = probe test (testing plan §1.1), H = hardware acceptance checklist (§3).
 Implementation assumes A1–A9 pass. A10–A19 only adjust constants and edge handling.
 
 ---

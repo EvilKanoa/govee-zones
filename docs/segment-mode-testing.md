@@ -2,8 +2,8 @@
 
 Companion to [`segment-mode-plan.md`](segment-mode-plan.md). There are three parts:
 
-1. **Hardware probe.** A CLI that checks each assumption (A1–A19) on the real strip and
-   records the answers. This gates the implementation.
+1. **Hardware probe.** A guided CLI (5 tests) that checks the key assumptions on the real
+   strip and records the answers. This gates the implementation.
 2. **Unit and engine tests** (Vitest). These pin the exact behaviour as tables and matrices, so
    any change in behaviour shows up as a failing row.
 3. **Hardware acceptance checklist.** Run it after implementation, against the real strip.
@@ -12,59 +12,64 @@ Companion to [`segment-mode-plan.md`](segment-mode-plan.md). There are three par
 
 ## 1. Hardware probe CLI
 
-### 1.1 Raw commands: `pnpm cli seg …`
+The strip has **5 segments** (H805A, per the Govee app). Segments count **from 1** in the CLI
+and the probe, as in the Govee app. Protocol masks are 0-based internally.
 
-They use the same encoder as the service (`src/server/protocol.ts`), so a passing probe also
-validates our bytes. `<segs>` is a list such as `0`, `0,2`, `3-5` or `all` (`all` needs `--segments N`).
+### 1.1 Guided probe: `pnpm cli probe --ip <ip> --segments 5`
+
+Five tests. Each one puts the strip in a known state, or steps between states when you press
+Enter, then asks what you see. Answers are multiple choice plus an optional note. They're saved
+after every test to `$DATA_DIR/probe-<time>.json` (default `./data`), together with the mask
+format and packing that test 1 found. `--dry` prints every datagram (BLE frames as hex) instead
+of sending it.
+
+Setup: govee-zones stopped, or "Release to Govee" on; LAN Control on; the whole strip in view.
+The probe starts by sending razer `disable`, `turn on` and LAN `brightness 100`.
+
+| # | Test | What the strip shows | Questions | Settles |
+|---|---|---|---|---|
+| 1 | **Map** | One packet: segments 1–5 red, yellow, green, blue, purple, plus brightness 100 % | Colors in order from the start? Blocks about equal length, 5 of them? | Command works (A1), mask layout (A2), several frames per packet (A7), segment count and even split (A14) |
+| 2a | **Panel** | 1: white LEDs 2700 K 100 % · 2: RGB-mixed 2700 K 100 % · 3: white LEDs 2700 K 20 % · 4: red 20 % · 5: red 100 % | 1 vs 2: different, and 1 like the app's white? 3 dimmer than 1? 4 dimmer than 5? | **Real white (A3)**, per-segment dimming for white and RGB (A5) |
+| 2b | **Off** | All warm white, then 1: off by RGB 0 + kelvin 0 · 2: off by brightness 0 · 3: off by both · 4, 5 left on | Which of 1–3 are fully dark? Did 4, 5 stay on? | How to turn a segment off (A6), and that other segments are left alone |
+| 3 | **Toggle** | All warm white; each Enter steps segment 1 through 2700 K → 6500 K → blue → 2700 K | Warm → cool visible? Clean switch to blue and back? | Kelvin is used (A3, A17), one segment does both white and RGB (A4) |
+| 4a | **Fade** | Segment 1 fades 5 → 100 % over 2 s at 10 updates/s, then at 20/s (repeatable) | Smooth, stepped, jumpy, or no change until the end? | Update rate, firmware fade (A8) |
+| 4b | **Switch** | 3 cycles: all warm white (segments) → `enable` + blue razer frames for 3 s → `disable` → warm white again | Flash when switching to per-LED? When switching back (Govee scene, old colors)? | Switching cost (A11, A12) |
+| 5a | **Power** | Green → `turn off` → warm white sent while off → `turn on` | White straight away, or green first? | Frames while off (A15) |
+| 5b | **Hold** | Warm white, then nothing sent for ≥ 3 minutes (the probe enforces the wait) | Still warm white? | Holds with no keepalive (A9) |
+
+**Test 1 fallbacks.** If the colors aren't exactly right, the probe retries with other layouts,
+asking again each time:
+1. 3-byte mask, LSB first, all frames in one packet (default);
+2. same, one frame per packet (only if nothing or only some segments changed);
+3. 7-byte mask, LSB first;
+4. 3-byte mask, MSB first;
+5. 7-byte mask, MSB first.
+
+The first layout that matches is used for the rest of the run and recorded. If none matches,
+the probe stops: the format is wrong, and `seg raw` is the tool for finding the right one.
+
+**Go/no-go:** start the implementation when test 1 passes, test 2a shows real white (A3) and
+per-segment dimming (A5), 2b finds an off method (A6), and 4a gives a usable rate (A8). Each
+failed result maps to the "If false" column of the plan's §1.
+
+Not probed up front (lower risk, covered by the acceptance checklist in §3): app scene override
+(A10), LAN brightness interaction (A13), resend blink (A16), full kelvin range (A17), power cycle
+(A18).
+
+### 1.2 Raw commands: `pnpm cli seg …`
+
+For follow-up checks after the probe. They use the same encoder as the service.
 
 | Command | Sends |
 |---|---|
 | `seg color <segs> <r> <g> <b>` | Color frame, kelvin 0 |
-| `seg white <segs> <kelvin> [--rgb r,g,b] [--tint r,g,b]` | Color frame with kelvin. Defaults: RGB `ff ff ff`, tint = `miredsToRgb` |
+| `seg white <segs> <kelvin>` | Color frame: RGB `ff ff ff`, kelvin, tint = RGB look of that kelvin |
 | `seg bright <segs> <0-100>` | Brightness frame |
-| `seg off <segs> [--method zero\|bright0\|both]` | Off by RGB 0 + kelvin 0, by brightness 0, or both |
-| `seg raw <hex> [<hex>…]` | Arbitrary BLE payloads (≤ 19 bytes each). Checksum and padding added; all in one datagram |
-| `seg sweep --segments N [--ms 1500]` | Lights segment *i* red with all others off, for each *i*, printing the index. Used to find the count and boundaries |
-| `seg rate <segs> --hz H --seconds S` | Alternates the brightness 20↔100 at H Hz and prints the datagrams sent. Used to find the rate at which updates are lost |
-| `seg fade <segs> <kelvin> --from P --to Q --ms D --hz H` | Stepped brightness fade, to check visually |
-| `seg multi <n>` | One datagram with *n* frames, each setting a different segment a different color |
-| `seg switch --cycles N --segments N` | Repeats: segment state A → `enable` + one razer frame B → `disable` → state A, with 2 s pauses. Used to watch for flashes |
+| `seg off <segs>` | RGB 0 + kelvin 0, and brightness 0 |
+| `seg raw <hex> [<hex>…]` | Raw BLE payloads (≤ 19 bytes each); checksum and padding added; one datagram |
 
-Global options: `--ip` (required), `--mask-order le|be`, `--mask-offset <byte>` (default 12 for
-color frames and 5 for brightness frames), `--dry` (print the hex and base64 without sending).
-
-### 1.2 Guided probe: `pnpm cli probe --ip <ip>`
-
-An interactive script that runs P1–P18 in order. For each step it prints what it sends and what to
-look for, then asks a question (y / n / other, plus a free-text note). Answers go to
-`data/probe-<date>.json`: `{ probe, assumption, sent: [hex…], answer, note }`. Setup: govee-zones
-stopped or released, phone with the Govee app nearby, strip visible.
-
-| Probe | Checks | Steps | Question |
-|---|---|---|---|
-| P1 | A1 | `seg color 0 255 0 0` | Did anything change? |
-| P2 | A2 | `seg color 0 …`, then `seg color 1 …`, then `seg color 0,1 …` | Did the right segments change? (If not, rerun with `--mask-order be` or other offsets) |
-| P3 | A2 | Sweep of the first 3 segments | Does the order go along the strip from the start? |
-| P4 | A3 | `seg white 0 2700` next to the app's own 2700 K on segment 1 (set in the app first), then `seg white 0 6500` | Is it the white LEDs (does it match the app)? Does kelvin change the look? |
-| P5 | A4 | `seg color 0 0 0 255` after P4 | Does it switch from white to blue? |
-| P6 | A5 | `seg bright 0 10`, then `100`, on an RGB segment and on a white segment | Dims for both? Other segments unchanged? |
-| P7 | A6 | `seg off 0 --method zero`, then `bright0`, then `both` | Which ones go fully dark? |
-| P8 | A7 | `seg multi 2`, `4`, `8`, `12` | Did all segments apply for each? Largest *n* that works? |
-| P9 | A8 | `seg rate 0 --hz 5`, `10`, `20`, `30` for 5 s each; `seg fade 0 2700 --from 5 --to 100 --ms 2000 --hz 10` | Highest rate with no visible misses? Smooth or stepped? Does the firmware add its own fade? |
-| P10 | A9 | Set a segment state and wait 3 minutes | Still showing after 3 minutes? |
-| P11 | A10 | Start an app scene, then `seg white all 2700` | Did the scene stop and white appear? |
-| P12 | A11, A12 | `seg switch --cycles 5`; also send `seg color` while razer is enabled | Any flash on switching? Do segment frames apply during razer? |
-| P13 | A13 | LAN `brightness 50`, then a segment at 100 % | Is it half brightness? |
-| P14 | A14, A19 | `seg sweep --segments 64` (count the last lit index), plus `pnpm cli pixel` at each boundary | Segment count? Are boundaries even (record the LED index of each)? |
-| P15 | A15 | `off`; `seg white 0 2700`; `on` | When it turns on: our state immediately, or the old one first? |
-| P16 | A16 | Re-send the same state 20× at 2 Hz | Any blink? |
-| P17 | A17 | `seg white 0` at 1800, 2000, 2200, 2700, 4000, 6500, 9000 | Lowest and highest kelvin that change the look? |
-| P18 | A18 | Pull power mid-state, restore it, then `seg bright 0 50` | State after power-up? Does the command apply without `turn on`? |
-
-**Go/no-go:** the implementation starts when P1–P9 match the expected answers, or when the plan's
-"If false" column has been applied for each one that didn't. Constants come from the probe file:
-`SEGMENT_STEP_MS` (P9), maximum frames per datagram (P8), kelvin range (P17), off method (P7),
-segment count and boundaries (P14).
+`<segs>` is `1`, `1,3`, `2-4` or `all` (with `--segments`). Options: `--mask-bytes <n>` (default 3),
+`--msb`, `--dry`.
 
 ---
 

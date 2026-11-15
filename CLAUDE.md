@@ -17,6 +17,7 @@ Node 22.12+ is required (Volta pins Node 24 in `package.json`); use pnpm.
 - `pnpm build` → `dist/web` + `dist/server`. Run with `node dist/server/server/main.js`.
 - `docker compose up -d --build` — the container (`Dockerfile`: build → prod deps → `node:24-alpine` runtime, healthcheck on `/healthz`). `.github/workflows/docker.yml` tests, then pushes multi-arch images to `ghcr.io/evilkanoa/govee-zones`. The Unraid template is `unraid/govee-zones.xml`.
 - `pnpm cli <enable|disable|on|off|fill|pixel|chase> --ip <ip> -n <count>` — protocol CLI for hardware checks.
+- `pnpm cli probe --ip <ip> --segments 5` — guided segment-mode hardware probe (`docs/segment-mode-testing.md`); `pnpm cli seg …` sends raw segment (`ptReal`) commands. `--dry` prints instead of sending.
 
 ## Layout
 
