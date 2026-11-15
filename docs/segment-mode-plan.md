@@ -237,8 +237,8 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
   Then one brightness frame per distinct `pct` among lit groups (never 0; F7).
   Frames are packed ≤ 6 per datagram (F4).
 - **Diffing.** Send only groups whose look changed since the last send. The **full state** is
-  re-sent every 30 s along with `brightness_max` (F9: invisible; covers power cycles and app
-  changes, U2).
+  re-sent every 30 s along with `brightness_max` and a trailing `turn_on` (F9: invisible; covers
+  power cycles and app changes, including a power-off from the app, U2).
 - **Pacing.** Group ticks are at least `GROUP_STEP_MS = 100` apart, including fade steps
   (F8: smooth with the firmware glide). Per-LED stays at 33 ms. A transition of 0 still glides
   < 0.5 s in group mode; that's documented, not worked around.

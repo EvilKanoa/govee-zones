@@ -330,7 +330,13 @@ export class Engine extends EventEmitter<{
     const before = [...dec.before];
     const due = now - c.lastAssert > REASSERT_MS;
     if (dec.held === 'per_led' && !before.includes('enable') && due) before.push('brightness_max', 'enable');
-    if (dec.held === 'groups' && dec.frame === 'groups' && !before.includes('brightness_max') && due) before.push('brightness_max');
+    const after = [...dec.after];
+    if (dec.held === 'groups' && dec.frame === 'groups' && !before.includes('brightness_max') && due) {
+      // Undo Govee app changes. Ends with turn_on: if the app powered the strip off, the
+      // frames alone would light it while its power state stays off (it then goes dark at random).
+      before.push('brightness_max');
+      if (!after.includes('turn_on')) after.push('turn_on');
+    }
     if (before.includes('brightness_max') || before.includes('enable')) c.lastAssert = now;
     // Full group send on entry (the Govee app may have changed the strip meanwhile) and on every reassert.
     const fullGroups = wasHeld !== 'groups' || due;
@@ -356,8 +362,8 @@ export class Engine extends EventEmitter<{
       // Not driving the strip (idle, released, disabled): preview what the lights would show.
       preview = composite(d, lights, states, now);
     }
-    ok = (await this.runActions(d, dec.after, c)) && ok;
-    if (ok && before.length + dec.after.length + (dec.frame ? 1 : 0) > 0) c.error = undefined;
+    ok = (await this.runActions(d, after, c)) && ok;
+    if (ok && before.length + after.length + (dec.frame ? 1 : 0) > 0) c.error = undefined;
     if (c.error) c.mode = 'error';
 
     this.emit('frame', d.id, preview, realWhite);

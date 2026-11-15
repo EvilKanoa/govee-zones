@@ -63,7 +63,7 @@ describe('Engine: group control', () => {
     expect(engine.status(device.id)).toEqual({ mode: 'groups', reason: 'auto', groups: 15 });
   });
 
-  it('E2 re-sends brightness and the full state every 30 s, nothing in between', async () => {
+  it('E2 re-sends brightness, the full state and turn on every 30 s, nothing in between', async () => {
     const { engine, sent, A } = setup();
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -71,7 +71,8 @@ describe('Engine: group control', () => {
     await vi.advanceTimersByTimeAsync(29_000);
     expect(sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(sent).toEqual(['bright:100', 'g 1-2 white 2703K', 'g 3-15 off', 'g 1-2 100%']);
+    // turn_on last: undoes a power-off from the Govee app without leaving the strip half-off.
+    expect(sent).toEqual(['bright:100', 'g 1-2 white 2703K', 'g 3-15 off', 'g 1-2 100%', 'turn:1']);
   });
 
   it('E3 sends only what changed', async () => {
