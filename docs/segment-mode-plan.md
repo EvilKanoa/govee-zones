@@ -259,6 +259,26 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 - Held groups: nothing is sent. The lights stay until something is picked in the Govee app.
 - Light commands keep being stored. Un-release → R3; our state takes over from any app scene (F11).
 
+### 3.5a Parking (pending probe round 3)
+
+The strip's stored group state is what shows when **something else** turns it on (the Govee app,
+govee2mqtt), and possibly what per-LED reverts to after its ~60 s timeout. Parking keeps that
+state deliberate: the lights' **last steady look**, rounded to groups with real white.
+
+- **Park look** = `plan()` over the lights' last on-states (captured when the last visible light
+  turns off; not a fade's black end), with rounding forced (ignores `exact` and overrides).
+- **Turning off** (R10, R11) becomes: `turn_off` → `disable` (if per-LED) → park frames while off.
+  Nothing is visible at any step (F10: frames while off are stored silently). In group mode, the
+  park frames are skipped when the stored state already matches (diffing).
+- **Entering per-LED** from none (R7): park frames for the current plan go first, while the strip
+  is still off, then `turn_on`, `brightness_max`, `enable`. If govee-zones dies while streaming,
+  the timeout reverts to that approximation, if round 3 test 2 confirms it does. It can't be
+  updated while streaming (F14), so it's from the moment per-LED started. Entering per-LED from
+  groups (R8) needs nothing: the stored state is already the current groups.
+- Depends on round 3: test 1 (turn off while per-LED is on, then disable and park, is invisible;
+  outside turn-on shows the park) and test 2 (the timeout reverts to the stored groups). If test 1
+  fails, the order changes; if test 2 fails, entry parking is dropped (turn-off parking stays).
+
 ### 3.6 Overrides
 
 | Override | Group control available | Otherwise |

@@ -72,7 +72,18 @@ Answers go to `$DATA_DIR/probe-r2-<time>.json`.
 | 5 | **Switch back** | Warm white → per-LED blue 3 s → back, three ways: A disable then segments; B segments while per-LED is on, 1.5 s, then disable; C both together (all repeatable) | Clean, or what flashed? For B: did it change while per-LED was still on? | Switch order and dwell (A11, A12) |
 | 6 | **Govee app** | You start an app scene, then warm white is sent. Then LAN brightness flips 100 ↔ 50 | Did the scene stop everywhere? Does LAN brightness dim? | A10, A13 |
 
-### 1.3 Raw commands: `pnpm cli seg …`
+### 1.3 Round 3: `pnpm cli probe --round 3 --ip <ip>` (parking)
+
+Only the first 4 groups (16 LEDs) are used; the rest of the strip stays dark. Colors: green = an
+old stored state, blue = per-LED, warm white = the parked look. Answers go to
+`$DATA_DIR/probe-r3-<time>.json`.
+
+| # | Test | Sequence | Questions | Settles |
+|---|---|---|---|---|
+| 1 | **Park** (repeatable) | Groups green → per-LED blue 3 s → `turn off` while per-LED is on → `disable` while off → park warm white while off. Then you turn the strip on from the Govee app (or the probe sends LAN `turn on`) | Blue straight to dark, or a flash of green / warm white? At turn-on: warm white (parked), green, blue, or other? | Whether parking can be invisible, and whether an outside turn-on shows the parked look |
+| 2 | **Timeout revert** (repeatable) | Groups warm white → per-LED blue 3 s → frames stop with no `disable`. You press Enter the moment the LEDs change (up to 120 s; the time is recorded). Then `disable` | What it changed to: stored groups, a Govee scene, off, or nothing? Did `disable` change anything? | Whether parking on per-LED entry gives crash recovery |
+
+### 1.4 Raw commands: `pnpm cli seg …`
 
 For follow-up checks after the probe. They use the same encoder as the service.
 
