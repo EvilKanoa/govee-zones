@@ -118,8 +118,8 @@ File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
 
 | Question | Why it matters | How to settle |
 |---|---|---|
-| Entering per-LED: is the "flash" just the hard cut, or a brief wrong color/black? | Whether entering per-LED needs a mitigation | Ask; a short re-test if it's a wrong color |
-| Strips with more than 24 groups (> 96 LEDs at 4 per group): does a wider mask work, and is the group size always 4? | The real installation may be longer than this 60-LED test strip | Probe on the real strip, or treat as untested and fall back to per-LED |
+| ~~Entering per-LED: hard cut or wrong color?~~ | **Answered: just the abrupt instant cut** (white → blue). No mitigation needed | — |
+| Strips with more than 24 groups, or group sizes other than 4 | Not testable here; the house strip is the priority | Plan treats them as unsupported: per-LED with reason `too_many_groups` |
 | More than 6 frames per datagram | Packing worst case (15 different looks) | Pack ≤ 6 per datagram; no test needed |
 | Power cycle mid-state (A18), 24 h soak | Robustness | Acceptance checklist |
 
@@ -131,12 +131,12 @@ File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
 | A3 Real white | ✅ Confirmed at both ends (matches the app) |
 | A6 Off | ✅ RGB 0 + kelvin 0 (brightness 0 is not off) |
 | A8 Update rate | ⚠️ Firmware glides < 0.5 s on every change; stepping at 10/s looks smooth |
-| A11 Switch flash | ⚠️ Return is clean; entering per-LED shows a hard cut or flash |
+| A11 Switch flash | ✅ Return is clean; entering per-LED is an instant hard cut (accepted) |
 | A12 Segments ignored during razer | ❌ False: they apply. The invariant "no segment frames while held per-LED" now prevents real glitches, not just waste |
 | A14 Segment layout | 🔁 Replaced: 4-LED groups (15 here) |
 | A17 Kelvin range | ✅ 2700–6500 K |
 | A18 Power cycle | Open (acceptance checklist) |
-| A19 Mask size | Open for > 24 groups |
+| A19 Mask size | Out of scope: > 24 groups fall back to per-LED |
 
 ### Impact on the plan (cumulative)
 
@@ -147,9 +147,11 @@ File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
 | `ct` lights and MQTT (§2.1, §3.7) | Discovery range **2700–6500 K** (was 2000–6535). Clamp commands to it. |
 | Encoding (§3.4) | White = kelvin with RGB and tint zero (they're ignored; zero is simplest). Off = RGB 0 + kelvin 0. Brightness 1–100; a lit group is never sent 0. Up to 6 frames per datagram. |
 | Fades (§3.4) | Keep stepping at 10/s, since the firmware's glide smooths the steps. Transition 0 still glides < 0.5 s in segment mode: document it rather than work around it. |
-| Switching (§3.3) | Return to segments: no special ordering or dwell needed (R6 simplified). Entering per-LED (R8): pending the flash question. R5 (no switch mid-fade) stays. |
+| Switching (§3.3) | Return to segments: no special ordering or dwell needed (R6 simplified). Entering per-LED (R8): an instant hard cut, accepted. R5 (no switch mid-fade) stays. |
 | Invariant I2 | Now essential: a segment frame sent while held per-LED would visibly override the stream. Segment and razer sends stay on separate coalesce keys, and a switch flushes the other kind. |
 | Brightness pin | Keep `brightness 100` on entry and every 30 s in **both** modes: LAN brightness scales segment output, so a change in the Govee app would otherwise dim everything. |
 | Release / un-release | Confirmed: on un-release, sending our state takes over from an app scene. |
 | Per-LED white | RGB-mixed white is about as bright, but the wrong tint. The UI says "approximate white", not "dimmer". |
 | UI wording | "Groups of 4 LEDs", never "segments", to avoid confusion with the Govee app. |
+
+The plan has been rewritten around these results ([`segment-mode-plan.md`](segment-mode-plan.md) §1 lists them as facts F1–F14).

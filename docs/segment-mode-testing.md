@@ -2,8 +2,8 @@
 
 Companion to [`segment-mode-plan.md`](segment-mode-plan.md). There are three parts:
 
-1. **Hardware probe.** A guided CLI (5 tests) that checks the key assumptions on the real
-   strip and records the answers. This gates the implementation.
+1. **Hardware probe** (done, two rounds). Guided CLI tests on the real strip; results in
+   [`segment-mode-results.md`](segment-mode-results.md).
 2. **Unit and engine tests** (Vitest). These pin the exact behaviour as tables and matrices, so
    any change in behaviour shows up as a failing row.
 3. **Hardware acceptance checklist.** Run it after implementation, against the real strip.
@@ -57,7 +57,7 @@ Not probed up front (lower risk, covered by the acceptance checklist in §3): ap
 (A10), LAN brightness interaction (A13), resend blink (A16), full kelvin range (A17), power cycle
 (A18).
 
-### 1.2 Round 2: `pnpm cli probe --round 2 --ip <ip>`
+### 1.2 Round 2: `pnpm cli probe --round 2 --ip <ip>` (done)
 
 Re-checks round 1's uncertain answers in ways that are harder to misread (large areas, A/B on
 the same LEDs), and covers the rest. Every animation can be replayed (`r`) before answering.
@@ -92,74 +92,80 @@ For follow-up checks after the probe. They use the same encoder as the service.
 ## 2. Unit and engine tests
 
 Conventions: table-driven `it.each`, with expected values written out by hand rather than
-computed by the code under test. New files are marked *(new)*.
+computed by the code under test. Fixtures use the house strip: **60 LEDs, group size 4,
+15 groups**. Group numbers below are 0-based (code); the UI shows them from 1. New files are
+marked *(new)*. F-numbers refer to the verified facts in the plan's §1.
 
-### 2.1 `test/protocol.test.ts`: segment encoding
+### 2.1 `test/protocol.test.ts`: segment encoding (partly done)
 
 | Case | Expectation |
 |---|---|
-| `bleFrame` pads to 20 bytes and XORs bytes 0–18 | Exact bytes |
-| Discussion vector: `33 05 15 01 FF FF FF 0B B8 FF B9 69 01` | Exact 20 bytes + base64 (replaced with the probe-captured vector after P4) |
-| `segmentMask([0])`, `[1]`, `[0,1]`, `[8]`, `[55]` | `01`, `02`, `03`, `00 01`, `… 80` |
-| `segmentMask([56])` | Throws |
-| Brightness frame `33 05 15 02 32 01` | Exact bytes |
-| Payload > 19 bytes | Throws |
-| `ptReal([a,b])` | `{"msg":{"cmd":"ptReal","data":{"command":["…","…"]}}}` |
+| ✅ `bleFrame` pads to 20 bytes, XOR of bytes 0–18; > 19 bytes throws | Exact bytes |
+| ✅ Community 3000 K vector | Exact 20 bytes |
+| ✅ `segmentMask` LSB/MSB/width | `[0]`→`01 00 00`, `[1,4]`→`12 00 00`, `[8]`→`00 01 00` |
+| ✅ Brightness frame, clamping | `33 05 15 02 32 01 00 00 …` |
+| ✅ `ptReal` wrapping | Exact JSON |
+| New: frames as the service sends them (F5, F7) | white 2700 K = `33 05 15 01 00 00 00 0a 8c 00 00 00 <mask>`; off = `33 05 15 01 00 × 8 <mask>` |
+| New: packing ≤ 6 frames per datagram (F4) | 7 frames → datagrams of 6 + 1 |
 | Existing razer vector `uwABsQEK` | Unchanged |
 
-### 2.2 `test/segments.test.ts` *(new)*: geometry and rounding
+### 2.2 `test/groups.test.ts` *(new)*: geometry and rounding
 
-`segmentBounds`:
+`groupBounds` / `groupBoundaries`:
 
-| LEDs | Count | Expected |
+| LEDs | Size | Bounds | Boundaries |
+|---|---|---|---|
+| 60 | 4 | `[0,3] [4,7] … [56,59]` (15) | `4, 8, …, 56` (14) |
+| 62 | 4 | 15 × 4, then `[60,61]` | `4, …, 56, 60` |
+| 60 | 0 | none | none |
+
+`roundToGroups` (60 LEDs, size 4):
+
+| Ranges | Groups | Why |
 |---|---|---|
-| 60 | 6 | `[0,9] [10,19] … [50,59]` |
-| 61 | 6 | Uneven split, all LEDs covered, no overlap |
-| 5 | 5 | One LED each |
-
-`roundToSegments` (60 LEDs, 6 segments of 10):
-
-| Ranges | Expected segments | Why |
-|---|---|---|
-| `[0,9]` | `0` | Aligned |
-| `[0,14]` | `0,1` | Seg 1 is 5/10 = 50 % → included |
-| `[0,13]` | `0` | 4/10 < 50 % |
-| `[3,9]` | `0` | 7/10 |
-| `[3,6]` | `0` | 4/10, but the light would vanish → largest-coverage fallback |
-| `[8,11]` | `0` | Tie (2 and 2) → lowest index |
-| `[0,9],[30,39]` | `0,3` | Multi-range |
+| `[0,3]` | `0` | Aligned |
+| `[0,5]` | `0,1` | Group 1: 2/4 = 50 % → included |
+| `[0,4]` | `0` | Group 1: 1/4 |
+| `[1,3]` | `0` | 3/4 |
+| `[2,5]` | `0,1` | 2/4 each → both |
+| `[3,4]` | `0` | 1/4 each → fallback to most covered, tie → lowest |
+| `[0,3],[20,23]` | `0,5` | Multi-range |
+| `[56,59]` | `14` | Last group |
 | `[]` | none | |
 
-`isAligned`: true for `[10,29]`, false for `[10,28]`.
+Plus: every edge moves by ≤ 2 LEDs over all ranges `[a,b]` with 0 ≤ a ≤ b < 60 (an exhaustive
+sweep). `isAligned`: true for `[4,11]`, false for `[4,10]`.
 
-### 2.3 `test/plan.test.ts` *(new)*: control decision and segment looks
+### 2.3 `test/plan.test.ts` *(new)*: control decision and group looks
 
-**Control matrix:** every combination of
-`segmentCount ∈ {0, 6}` × `control ∈ {auto, per_led}` × `partialSegments ∈ {round, exact}` ×
-`visible lights ∈ {none, aligned only, aligned + partial}` × `override ∈ {none, identify, pixel}`.
-That's 72 rows, each with the expected `control` + `reason` written out. Key rows:
+**Control matrix:** the cross-product of
+`groupSize ∈ {0, 4}` × `ledCount ∈ {60, 200}` × `control ∈ {auto, per_led}` ×
+`partialGroups ∈ {round, exact}` × `visible ∈ {none, aligned, aligned + partial}` ×
+`override ∈ {none, identify, pixel}`. That's 144 rows, generated, each checked against a
+hand-written rule table. Key rows written out:
 
-| segs | control | partial | lights | override | → control | reason |
-|---|---|---|---|---|---|---|
-| 0 | auto | round | aligned | none | per_led | no_segments |
-| 6 | per_led | round | aligned | none | per_led | per_led_setting |
-| 6 | auto | round | aligned+partial | none | **segments** | auto |
-| 6 | auto | exact | aligned+partial | none | per_led | exact_leds (detail: partial light) |
-| 6 | auto | exact | aligned only | none | segments | auto |
-| 6 | auto | exact | none | none | segments | auto (all off) |
-| 6 | auto | round | aligned | identify | segments | auto (blinking segments) |
-| 6 | auto | round | aligned | pixel | per_led | override |
-| 0 | auto | round | aligned | identify | per_led | no_segments |
+| size | LEDs | control | partial | visible | override | → | reason |
+|---|---|---|---|---|---|---|---|
+| 0 | 60 | auto | round | aligned | none | per_led | groups_off |
+| 4 | 200 | auto | round | aligned | none | per_led | too_many_groups (50 > 24) |
+| 4 | 60 | per_led | round | aligned | none | per_led | per_led_setting |
+| 4 | 60 | auto | round | aligned+partial | none | **groups** | auto |
+| 4 | 60 | auto | exact | aligned+partial | none | per_led | exact_leds (detail = partial light) |
+| 4 | 60 | auto | exact | aligned | none | groups | auto |
+| 4 | 60 | auto | exact | none | none | groups | auto (all off) |
+| 4 | 60 | auto | round | aligned | identify | groups | auto (blinking groups) |
+| 4 | 60 | auto | round | aligned | pixel | per_led | override |
+| 0 | 60 | auto | round | aligned | identify | per_led | groups_off |
 
-**Look per capability:** one light on segments 0–1, everything else off.
+**Look per capability:** one light on groups 0–1, everything else off.
 
-| Capability | Default look | State | Segment 0–1 look | Segments 2–5 |
+| Capability | Default look | State | Groups 0–1 | Groups 2–14 |
 |---|---|---|---|---|
-| onoff | rgb #ff0000 | on | rgb ff0000 100 % | off |
+| onoff | rgb `ff0000` | on | rgb `ff0000` 100 % | off |
 | onoff | white 370 mireds | on | white 2703 K 100 % | off |
 | dimmable | white 370 | on, bri 128 | white 2703 K 50 % | off |
 | dimmable | white 370 | on, bri 1 | white 2703 K **1 %** (never 0 while on) | off |
-| rgb | n/a | on, color 00ff00, bri 255 | rgb 00ff00 100 % | off |
+| rgb | – | on, `00ff00`, bri 255 | rgb `00ff00` 100 % | off |
 | ct | white 250 | on, bri 255 | white 4000 K 100 % | off |
 | any | any | off | off | off |
 
@@ -167,121 +173,116 @@ That's 72 rows, each with the expected `control` + `reason` written out. Key row
 
 | Setup | Expected |
 |---|---|
-| A (prio 0, white, segs 0–3), B (prio 1, rgb red, segs 2–5), both on | 0–1 white, 2–5 red |
-| Same, B off | 0–3 white, 4–5 off |
+| A (prio 0, white, groups 0–3), B (prio 1, red, groups 2–5), both on | 0–1 white, 2–5 red, 6–14 off |
+| Same, B off | 0–3 white |
 | Equal priority, B created later | B wins the overlap |
-| B rounds onto a segment A covers exactly | B wins segment (rounded coverage counts like real coverage) |
+| B rounds onto a group A covers exactly | B wins that group |
 
-**Fades** (fixed `now` at 0 / 25 / 50 / 75 / 100 % of a 1000 ms fade):
+**Fades** (at 0 / 25 / 50 / 75 / 100 % of a 1000 ms fade):
 
-| Fade | Expected at 0/25/50/75/100 % |
+| Fade | Expected |
 |---|---|
-| ct off→on, bri 255 | pct 0/25/50/75/100, kelvin constant |
-| ct on→off | pct 100/75/50/25/0 → off |
-| ct bri 255→51 | pct 100/80/60/40/20 |
-| ct 2700→6500 K | Mireds interpolate linearly (370→154); pct constant |
-| rgb red→blue | RGB lerp |
-| dimmable (white default) off→on | Fades in at the white look from pct 0, with no colour sweep |
-| B (white, prio 1) fading out over A (rgb, prio 0) | pct blends; kind = B's until 50 %, A's from 50 % |
+| ct off → on, bri 255 | pct 0→off, 25, 50, 75, 100; kelvin constant |
+| ct on → off | pct 100, 75, 50, 25, then off |
+| ct bri 255 → 51 | pct 100, 80, 60, 40, 20 |
+| ct 2700 → 6500 K | mireds 370 → 154 linear; pct constant |
+| rgb red → blue | RGB lerp |
+| dimmable (white default) off → on | Fades in at the white look from 0; no color sweep |
+| B (white, prio 1) fading out over A (rgb, prio 0) | pct blends; kind = B's below 50 %, A's from 50 % |
 
-### 2.4 `test/lifecycle.test.ts`: `decide()` matrix (rewritten)
+### 2.4 `test/lifecycle.test.ts`: `decide()` (rewritten)
 
-All rows are explicit. Inputs default to `enabled, !released, idle=off, fading=false`.
+Defaults: `enabled`, not `released`, idle `off`, groups available, not fading. Columns: before /
+frame / after → held, mode (reason).
 
-| # | enabled | released | idle | want | held | fading | → actions | held | frame | mode |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | ✗ | | | segments | per_led | | disable | none | – | idle |
-| 2 | ✗ | | | segments | segments | | – | none | – | idle |
-| 3 | ✗ | | | none | none | | – | none | – | idle |
-| 4 | ✓ | ✓ | | per_led | per_led | | disable | none | – | released |
-| 5 | ✓ | ✓ | | segments | segments | | – | none | – | released |
-| 6 | ✓ | ✓ | | none | none | | – | none | – | released |
-| 7 | ✓ | | | segments | none | | turn_on, brightness_max | segments | plan | segments |
-| 8 | ✓ | | | segments | segments | | – | segments | plan | segments |
-| 9 | ✓ | | | segments | per_led | ✓ | – | per_led | composite | per_led (fade_finishing) |
-| 10 | ✓ | | | segments | per_led | ✗ | disable | segments | plan | segments |
-| 11 | ✓ | | | per_led | none | | turn_on, brightness_max, enable | per_led | composite | per_led |
-| 12 | ✓ | | | per_led | segments | ✓/✗ | enable | per_led | composite | per_led |
-| 13 | ✓ | | | per_led | per_led | | – | per_led | composite | per_led |
-| 14 | ✓ | | off | none | per_led | | disable, turn_off | none | – | idle |
-| 15 | ✓ | | off | none | segments | | segments_all_off, turn_off | none | – | idle |
-| 16 | ✓ | | off | none | none | | – | none | – | idle |
-| 17 | ✓ | | release | none | per_led | | disable | none | – | idle |
-| 18 | ✓ | | release | none | segments | | segments_all_off | none | – | idle |
-| 19 | ✓ | | release | none | none | | – | none | – | idle |
-| 20 | ✓ | | hold_black (segs avail) | none | none | | turn_on, brightness_max | segments | black | idle |
-| 21 | ✓ | | hold_black (segs avail) | none | segments | | – | segments | black | idle |
-| 22 | ✓ | | hold_black (segs avail) | none | per_led | ✗ | disable | segments | black | idle |
-| 23 | ✓ | | hold_black (no segs) | none | none | | turn_on, brightness_max, enable | per_led | black | idle |
-| 24 | ✓ | | hold_black (no segs) | none | per_led | | – | per_led | black | idle |
-| 25 | ✓ | | hold_black (no segs) | none | segments | | enable | per_led | black | idle |
+| # | Inputs | before | frame | after | → held / mode |
+|---|---|---|---|---|---|
+| 1 | disabled, held per_led | disable | – | – | none / idle |
+| 2 | disabled, held groups | – | – | – | none / idle |
+| 3 | released, held per_led | disable | – | – | none / released |
+| 4 | released, held groups, want groups | – | – | – | none / released |
+| 5 | want groups, held none | brightness_max | groups | turn_on | groups / groups |
+| 6 | want groups, held groups | – | groups | – | groups / groups |
+| 7 | want groups, held per_led, fading | – | composite | – | per_led / per_led (fade_finishing) |
+| 8 | want groups, held per_led, not fading | disable | groups | – | groups / groups |
+| 9 | want per_led, held none | turn_on, brightness_max, enable | composite | – | per_led / per_led |
+| 10 | want per_led, held groups (fading or not) | enable | composite | – | per_led / per_led |
+| 11 | want per_led, held per_led | – | composite | – | per_led / per_led |
+| 12 | none, idle off, held per_led | disable, turn_off | – | – | none / idle |
+| 13 | none, idle off, held groups | turn_off | – | – | none / idle |
+| 14 | none, idle off, held none | – | – | – | none / idle |
+| 15 | none, idle release, held per_led | disable | – | – | none / idle |
+| 16 | none, idle release, held groups | – | groups_off | – | none / idle |
+| 17 | none, idle release, held none | – | – | – | none / idle |
+| 18 | none, hold_black, held none | brightness_max | groups_off | turn_on | groups / idle |
+| 19 | none, hold_black, held groups | – | groups_off | – | groups / idle |
+| 20 | none, hold_black, held per_led, not fading | disable | groups_off | – | groups / idle |
+| 21 | none, hold_black, no groups, held none | turn_on, brightness_max, enable | black | – | per_led / idle |
+| 22 | none, hold_black, no groups, held per_led | – | black | – | per_led / idle |
+| 23 | none, hold_black, no groups, held groups | enable | black | – | per_led / idle |
 
-Plus **invariant sweeps** over the full cross-product (2 × 2 × 3 × 3 × 3 × 2 × segs-available 2):
-
-- I1: if held was `per_led` and isn't any more → `actions[0] === 'disable'`.
-- I3/I2: if result held is `segments`, `enable` isn't in the actions, and frame ≠ razer.
-- I4: `turn_off` with held `segments` → preceded by `segments_all_off`.
-- I5: held `per_led`, want `segments`, fading → held stays `per_led`.
-- I6: held `none`, want `none`, idle ≠ hold_black → no actions.
+**Invariant sweeps** over the full cross-product (enabled 2 × released 2 × idle 3 × available 2 ×
+want 3 × held 3 × fading 2 = 432 cases): I1–I6 from plan §3.3.
 
 ### 2.5 `test/engine.test.ts`: scenarios (fake timers, recording transport)
 
-The recorder gains a `ptReal` decoder that writes labels such as
-`seg[0-1]:white:2703:100`, `seg[2-5]:off`, `seg[0]:bri:50`. Existing razer labels are unchanged.
+The recorder decodes `ptReal` into labels such as `g[0-1]:white:2703`, `g[2-14]:off`,
+`g[0-1]:pct:50`; razer and LAN labels are unchanged. Device: 60 LEDs, size 4.
 
-| ID | Scenario | Expected datagram sequence / state |
+| ID | Scenario | Expected |
 |---|---|---|
-| E1 | 3 `ct` lights aligned on a 6-segment strip; turn on A | `turn:1`, `bright:100`, `seg[…]` with A's segments white, the rest off; mode segments; **no** `enable` |
-| E2 | E1, then wait 10 s | Full segment refresh every `keepaliveMs`; nothing else |
-| E3 | E1, change A's brightness | Only A's group re-sent (diff) |
-| E4 | E1, all off with idle `off` | `seg[all]:off`, then `turn:0`; mode idle; then silence |
-| E5 | E1 + an `rgb` light partly covering a segment, `exact` | `enable`, razer frames; reason exact_leds; turn the rgb off with a 1 s fade → razer frames continue until the fade ends, then `disable`, `seg[…]` |
-| E6 | Same as E5 but `round` | Never `enable`; the rgb light painted on its rounded segments |
-| E7 | Identify in segment mode | Blinking `seg` datagrams; never `enable`; back to the plan after 5 s |
-| E8 | Pixel finder in segment mode | `enable` → razer → after 10 s `disable` → full `seg` state; **no** `turn:0` in between |
-| E9 | `control = per_led` | Never `ptReal`; identical to the existing razer tests |
-| E10 | `segmentCount = 0` | All existing engine tests pass unchanged (regression guard) |
-| E11 | Release while in segment mode | No datagrams; commands still stored; un-release → `turn:1`, `bright:100`, full `seg` |
-| E12 | `engine.stop()` in segment mode | No datagrams |
-| E13 | `engine.stop()` in per-LED mode | As today (`disable`, `turn:0`, or `disable` for release) |
-| E14 | Restart (new engine, same store) with a light on | `turn:1`, `bright:100`, full `seg`; no `turn:0`, no razer |
-| E15 | `hold_black` + segments, all off | `seg[all]:off`; never `enable` |
-| E16 | Segment-mode fade of 1 s | `seg` datagrams 100 ms apart (≈10), pct monotonic |
-| E17 | 20 commands in 50 ms | Coalesced: ≤ 1 datagram per 100 ms |
-| E18 | IP change in segment mode | Nothing to the old IP; re-entry to the new IP |
-| E19 | `segmentCount` edited 6 → 12 while lights on | Re-planned; full state for 12 segments |
-| E20 | More than 8 groups | Split across datagrams of ≤ 8 frames, paced |
-| E21 | Segment datagram queued, then switch to per-LED | `disable`-before-`seg` ordering never violated (separate coalesce keys) |
-| E22 | Brightness reassert in segment mode after 30 s | `bright:100`, no `enable` |
-| E23 | Status emitted | `{mode, reason, detail}` matches §2.3 at each step |
+| E1 | 3 aligned `ct` lights; turn on A | `bright:100`, group frames (A white, rest off, A's pct), then `turn:1`; mode groups; **no** `enable` |
+| E2 | E1, then 60 s | A full re-send + `bright:100` every 30 s; nothing else |
+| E3 | E1, change A's brightness | Only a brightness frame for A's groups |
+| E4 | E1, all off, idle off | `turn:0` only; mode idle; then silence |
+| E5 | E1, all off, idle release | `g[all]:off`; no `turn:0`; then silence |
+| E6 | + `rgb` light partly covering a group, exact; then off with a 1 s fade | `enable` + razer frames; reason exact_leds; razer continues until the fade ends, then `disable` + group frames |
+| E7 | Same as E6 but round | Never `enable`; the light painted on its rounded groups |
+| E8 | Identify in group mode | Group datagrams alternating every 700 ms; never `enable`; back to the plan after 5 s |
+| E9 | Pixel finder in group mode | `enable` → razer → `disable` → full group state; no `turn:0` |
+| E10 | `control = per_led` | Never `ptReal`; matches the existing razer tests |
+| E11 | `groupSize = 0` | All existing engine tests pass unchanged |
+| E12 | 200 LEDs, size 4 | Per-LED; reason too_many_groups |
+| E13 | Release in group mode | No datagrams; commands stored; un-release → full state, then `turn:1` |
+| E14 | `stop()` in group mode | No datagrams |
+| E15 | `stop()` in per-LED mode | As today |
+| E16 | Restart with a light on | `bright:100`, full group state, `turn:1`; no `turn:0`, no razer |
+| E17 | 1 s fade in group mode | Group datagrams ~100 ms apart (≈ 10), pct monotonic |
+| E18 | 20 commands in 50 ms | ≤ 1 update per 100 ms |
+| E19 | 15 distinct looks | Packed ≤ 6 frames per datagram |
+| E20 | Group datagrams queued, then a switch to per-LED | Queued group datagrams dropped; nothing group-related after `enable` (I2) |
+| E21 | IP change in group mode | Nothing to the old IP; entry at the new IP |
+| E22 | `groupSize` 4 → 2 while lights are on (30 groups → per-LED) | Switches with reason too_many_groups |
+| E23 | Status at each step | `{mode, reason, detail, groups}` as plan §2.3 |
 
 ### 2.6 Other suites
 
 | File | Cases |
 |---|---|
-| `commands.test.ts` | `ct` accepts brightness and color_temp, ignores color; `rgb` ignores color_temp; `onoff` with a white default turns on white; `dimmable` with a white default keeps its kelvin when dimmed |
-| `schemas.test.ts` | `rgb_ct` rejected; new device fields have defaults in input, none in patch (a partial patch leaves `control`/`partialSegments` alone); `ct` requires a white default |
-| `mqtt.test.ts` | `ct` discovery payload (exact object); mode sensor options; status payload with `reason`/`detail`; changing a light's capability republishes the same discovery topic with a new payload |
+| `commands.test.ts` | `ct` takes brightness and color_temp, ignores color; color_temp clamped to 154–370 mireds; `rgb` ignores color_temp; onoff/dimmable with a white default turn on white |
+| `schemas.test.ts` | `rgb_ct` rejected; white defaults outside 2700–6500 K rejected; new device fields have defaults in input and none in patch |
+| `mqtt.test.ts` | `ct` discovery payload exactly (min/max 2700/6500); mode sensor options; status with `reason`/`detail`/`groups`; a capability change republishes the same topic |
 | `transport.test.ts` | Simulated transport logs decoded `ptReal` |
-| `web/` helpers *(new, pure)* | `coverageLabel(light, device)` → "segments 6–7" / "rounded to segments 6–7" / "uses exact LEDs"; `snapSelection(cells, device)`; `modeExplanation(status)` → the exact strings in plan §4.2 |
+| `web/` helpers *(new, pure)* | `coverageLabel` → "groups 6–7" / "LEDs 22–29 → groups 6–7" / "uses exact LEDs"; `snapSelection`; `modeExplanation(status)` → the exact strings in plan §4.2; divider positions from `groupBoundaries` for both views |
 
 ---
 
 ## 3. Hardware acceptance checklist
 
-Run with the real H805A after implementation. Record pass/fail in the PR.
+Run on the house strip after implementation; record pass/fail in the PR.
 
 | # | Do | Pass when |
 |---|---|---|
-| H1 | Three `ct` zones on, at 2700 / 4000 / 6500 K | Real white LEDs (matches the app's own white); mode badge Segments |
-| H2 | Dim each from HA, 100 → 10 % | Smooth enough, others unaffected |
-| H3 | HA transition 2 s | No flash, visibly stepped but acceptable |
-| H4 | Turn all off (idle off), then on again | Clean; no flash of the old state |
+| H1 | Three `ct` zones on at 2700 / 4000 / 6500 K | Real white matching the app; badge Groups |
+| H2 | Dim each from HA, 100 → 1 % | Smooth; others unaffected; 1 % is lit |
+| H3 | HA transition 2 s | Smooth (glide + 10/s steps) |
+| H4 | All off (idle off), then on again | No flash of the old state |
 | H5 | Restart the container with lights on | **No blink** |
 | H6 | Stop the container for 5 min | Lights stay on |
-| H7 | Pixel finder, then wait | Switches to Per-LED, back to Segments, white returns; note any flash |
-| H8 | Identify a zone | Its segments blink; no mode switch |
-| H9 | `exact` + a partial RGB light on and off with a fade | Per-LED while on; fade-out finishes before switching back; badge reason correct |
-| H10 | Release, change a scene in the app, un-release | App works while released; our state comes back |
-| H11 | Power-cycle the strip with lights on | Lights back within one refresh |
-| H12 | Leave it running 24 h | No drift, no revert, no errors in the logs |
+| H7 | Pixel finder, then wait | Per-LED (hard cut in), back to Groups cleanly |
+| H8 | Identify a zone | Its groups blink; no mode switch |
+| H9 | `exact` + a partial RGB light, on then off with a fade | Per-LED while on; fade finishes before switching back; badge reason correct |
+| H10 | Release, use an app scene, un-release | The app works while released; our state takes over again |
+| H11 | Power-cycle the strip with lights on | Lights back within 30 s |
+| H12 | Run 24 h | No drift, no revert, no errors in the logs |
+| H13 | Strip and house views | Dividers every 4 LEDs in both, matching the real strip (check with Identify) |

@@ -1,60 +1,66 @@
-# Segment mode — implementation plan
+# Segment mode: implementation plan
 
-Status: **draft, not started.** Round 1 of the hardware probe is done, and its results change
-parts of this plan. The biggest change: the addressable unit is a **group of 4 LEDs**, not the
-Govee app's segments. See [`segment-mode-results.md`](segment-mode-results.md) ("Impact on the
-plan"). That doc overrides this one where they disagree. This plan gets rewritten once round 2
-is in.
+Status: **ready to build.** Two rounds of hardware probing on the real strip settled the
+protocol and behaviour. The evidence is in [`segment-mode-results.md`](segment-mode-results.md),
+and the tests that lock it in are in [`segment-mode-testing.md`](segment-mode-testing.md).
 
-This is v0, so there's no compatibility layer anywhere: `rgb_ct` is removed, and status
-modes are renamed outright.
+Scope: **this house's strip first.** An H805A, 60 LEDs, controllable in 15 groups of 4. Other
+strips work as long as they fit the tested mask (≤ 24 groups); anything bigger falls back to
+per-LED control with a clear reason. This is v0, so there's no compatibility layer: `rgb_ct` is
+removed and the status modes are renamed outright.
 
 ---
 
 ## 0. Summary
 
-Govee strips accept two local LAN commands on UDP 4003:
+The strip accepts two local LAN commands on UDP 4003:
 
-| | **Segments** (`ptReal` segment frames) | **Per-LED** (`razer` streaming) |
+| | **Groups** (`ptReal` segment frames) | **Per-LED** (`razer` streaming) |
 |---|---|---|
-| Resolution | Per app segment | Per LED |
-| White | Real white LEDs (kelvin field) | Mixed from RGB: pinker and dimmer |
-| Holding state | The strip holds it on its own | Needs a keepalive forever, with brightness pinned at 100 |
-| If govee-zones stops | Lights stay as they are | The strip goes back to its Govee scene after ~60 s |
-| Update rate | ~10/s (fades are stepped) | ~30 fps |
+| Resolution | Groups of 4 LEDs | Single LEDs |
+| White | Real white, matches the Govee app (2700–6500 K) | Mixed from RGB: about as bright, wrong tint |
+| Holding state | The strip holds it, even across `turn off`/`on` | Needs a keepalive forever; reverts to the Govee scene ~60 s after the last frame |
+| If govee-zones stops | Lights stay as they are | The Govee scene comes back |
+| Changes | The firmware glides every change (< 0.5 s) | Instant |
 
-Segments become the normal way to drive a strip, and per-LED becomes the precise fallback.
-The service picks one per strip on every tick, using a pure planner. Users get three
-settings, and the UI always says which method is active and why.
+Group control becomes the normal way to drive a strip, and per-LED becomes the precise fallback.
+The service picks one per strip on every tick, using a pure planner. Users get three settings,
+and the UI always shows the groups, which control method is active, and why.
+
+Naming: the UI and docs say **groups** (of 4 LEDs) and never "segments", which would be confused
+with the Govee app's segments. Code uses `group` too. "Segment" only appears for the protocol
+frames (`segmentColorFrame`, …) and in this plan's file name.
 
 ---
 
-## 1. Assumptions
+## 1. Verified facts this plan relies on
 
-| ID | Assumption | Test | If false |
-|---|---|---|---|
-| A1 | The H805A accepts `ptReal` over LAN (UDP 4003, LAN Control on). | T1 | Feature dead; stop. |
-| A2 | Color frame `33 05 15 01 RR GG BB KH KL TR TG TB <mask>`, mask little-endian from byte 12, bit *n* = segment *n*. | T1 | Find the real layout with `seg raw` / `--mask-bytes` / `--msb`; only the encoder changes. |
-| A3 | Kelvin ≠ 0 lights the **dedicated white LEDs** (RGB/tint ignored or harmless). | T2a, T3 | Segments lose the white advantage; keep the feature only for holding state on its own, or drop it. |
-| A4 | Kelvin = 0 with RGB sets an RGB color on the segment. | T3 | RGB lights always use per-LED; segment mode only for `ct`/white defaults. |
-| A5 | `33 05 15 02 <0-100> <mask>` sets brightness per segment, for both RGB and white. | T2a | RGB: dim by scaling RGB. White: segment mode only when every lit segment shares one brightness (use the LAN `brightness` command); otherwise per-LED. |
-| A6 | A segment can be turned fully off (RGB 0 + kelvin 0, or brightness 0). | T2b | Off segments need per-LED → segment mode only when every segment is lit. Unlikely to be acceptable. |
-| A7 | Several BLE frames in one `ptReal` datagram all apply, in order (the probe sends 6 at once; the service packs up to 8). | T1 | One frame per datagram (paced 15 ms) → slower updates; raise the step interval. |
-| A8 | Segment updates are applied without the firmware's own fade, at ≥ 10 updates/s without drops. | T4a | Step interval = measured rate. If firmware fades itself, use it and skip stepping. |
-| A9 | The strip holds the segment state indefinitely, with no revert timer. | T5b | Add a refresh at the measured period. |
-| A10 | A segment command ends a running app scene/effect. | H10 | Send a static mode command first (find via `seg raw`). |
-| A11 | Switching between modes (`B1 01` / `B1 00` ↔ segment frames) shows no more than one stale frame. | T4b | Add a minimum dwell (e.g. 5 s) before switching back to segments; never switch while something is visible if a flash is reliable. |
-| A12 | Segment frames sent while razer is enabled are ignored, so a switch must disable first. | T4b | If they apply, nothing breaks; we still disable first. |
-| A13 | The LAN `brightness` command scales segment brightness too; pinned at 100 it's neutral. | H2 | Don't pin brightness in segment mode. |
-| A14 | Segments split the LEDs evenly; the count matches the Govee app. | T1 | Add editable segment boundaries (layout becomes a list of ranges). |
-| A15 | Segment frames sent while the strip is powered off are stored and shown at `turn on` (no flash of the old state). | T5a | Turn on first, then send frames; accept a short flash, or send all-off before every `turn off` (we do that anyway, see §3.4). |
-| A16 | Re-sending identical segment state causes no visible change. | H5 | Only resend on change, plus a slow refresh. |
-| A17 | Supported kelvin range (expected ~2000–9000 K; HA range 2000–6535 K). | T3 (range: H1) | Clamp, and advertise the measured range in HA discovery. |
-| A18 | After a power cycle the strip comes back showing its last segment state (or off), and accepts segment frames again without re-entry. | H11 | Re-send the full state on every refresh (we do anyway). |
-| A19 | Segment count ≤ 56 (fits a 7-byte mask). Resolved: the strip has 5. | — | Investigate a wider mask variant. |
+All from the two probe rounds; the rows link back to the results doc.
 
-Test IDs: T = probe test (testing plan §1.1), H = hardware acceptance checklist (§3).
-Implementation assumes A1–A9 pass. A10–A19 only adjust constants and edge handling.
+| ID | Fact | Used in |
+|---|---|---|
+| F1 | `ptReal` over UDP 4003. Color frame `33 05 15 01 RR GG BB KH KL TR TG TB <mask>`, brightness frame `33 05 15 02 <1-100> <mask>`; 20-byte BLE frames with XOR checksum | §3.4 |
+| F2 | 3-byte mask, LSB first: bit *i* = group *i* from the start of the strip | §3.1 |
+| F3 | A group is **4 LEDs**; the 60-LED strip has 15 | §2.2, §3.1 |
+| F4 | Up to 6 frames per datagram apply in order (6 tested) | §3.4 |
+| F5 | Kelvin ≠ 0 shows real white matching the app; RGB and tint are then ignored. Range 2700–6500 K | §2.1, §3.4, §3.7 |
+| F6 | Per-group RGB and brightness 1–100 %; a group switches between white and RGB cleanly | §3.2 |
+| F7 | **Off = RGB 0 + kelvin 0.** Brightness 0 is clamped to 1 % (not off) | §3.4 |
+| F8 | Every change glides < 0.5 s; stepping at 10–20 updates/s looks smooth | §3.4 |
+| F9 | State holds with nothing sent (≥ 3 min); re-sending the same state is invisible | §3.3, §3.4 |
+| F10 | Frames sent while the strip is off are shown at `turn on`, with no flash | §3.3 |
+| F11 | A group command ends a running Govee app scene | §3.5 |
+| F12 | LAN `brightness` scales group output too | §3.4 |
+| F13 | Per-LED → groups is clean in any order. Groups → per-LED is an instant hard cut (accepted, no mitigation) | §3.3 |
+| F14 | Group frames take effect **even while razer is enabled** | §3.3 invariant I2 |
+
+Not verified, handled conservatively:
+
+| ID | Unknown | Handling |
+|---|---|---|
+| U1 | Strips with > 24 groups (wider masks), or group sizes other than 4 | Group control unavailable → per-LED, reason `too_many_groups`. `groupSize` is editable but defaults to 4 |
+| U2 | Power cycle mid-state (A18) | Full state is re-sent every 30 s anyway; acceptance checklist H11 |
+| U3 | More than 6 frames per datagram | Pack ≤ 6 |
 
 ---
 
@@ -62,288 +68,303 @@ Implementation assumes A1–A9 pass. A10–A19 only adjust constants and edge ha
 
 ### 2.1 Capabilities
 
-`Capability = 'onoff' | 'dimmable' | 'rgb' | 'ct'`. `rgb_ct` is removed. Existing `rgb_ct` lights
-in `data/config.json` must be changed by hand to `ct` (white) or `rgb`. There is no migration code.
+`Capability = 'onoff' | 'dimmable' | 'rgb' | 'ct'`. `rgb_ct` is removed; existing `rgb_ct` lights
+in the config must be changed by hand to `ct` or `rgb` (no migration code).
 
 | Capability | HA `supported_color_modes` | Commands accepted | Default look |
 |---|---|---|---|
-| `onoff` | `onoff` | `state` | color **or** white (kelvin) |
+| `onoff` | `onoff` | `state` | color **or** white |
 | `dimmable` | `brightness` | `state`, `brightness` | color **or** white |
 | `rgb` | `rgb` | `state`, `brightness`, `color` | color |
 | `ct` | `color_temp` | `state`, `brightness`, `color_temp` | white (required) |
 
-`LightDefaults = { brightness, look: { kind: 'rgb', color } | { kind: 'white', mireds } }`.
-`LightState` gets the same `look` union in place of `color` + `colorTemp`. Everywhere a light's
-color is needed, `lookRgb(look)` gives the RGB form (`miredsToRgb` for white).
+```ts
+type Look = { kind: 'rgb'; color: RGB } | { kind: 'white'; mireds: number };
+interface LightDefaults { brightness: number /* 1-255 */; look: Look }
+interface LightState { on: boolean; brightness: number; look: Look }
+```
+
+White is limited to **2700–6500 K (154–370 mireds)** (F5): schemas reject other defaults, and
+commands are clamped. `lookRgb(look)` gives the RGB form (`miredsToRgb` for white), used by
+per-LED rendering and the preview.
 
 ### 2.2 Device fields
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `segmentCount` | int 0–56 | 0 | Segments in the Govee app. 0 = segment control off. |
-| `control` | `'auto' \| 'per_led'` | `'auto'` | UI: **Control method** — Automatic / Per-LED only. |
-| `partialSegments` | `'round' \| 'exact'` | `'round'` | UI: **Lights that don't line up with segments** — Round to whole segments / Use exact LEDs. |
+| `groupSize` | int 0–16 | 4 | LEDs per mask bit. 0 = group control off. |
+| `control` | `'auto' \| 'per_led'` | `'auto'` | UI **Control method**: Automatic / Per-LED only. |
+| `partialGroups` | `'round' \| 'exact'` | `'round'` | UI **Lights that don't line up with groups**: Round to whole groups / Use exact LEDs. |
 
-Patch schemas come from the default-free base shape, as before (`test/schemas.test.ts` covers this).
+Group count = ⌈ledCount / groupSize⌉. Group control is **available** when `groupSize > 0`,
+group count ≤ 24 (U1), and `control = 'auto'`.
+
+Patch schemas come from the default-free base shapes, as before (`test/schemas.test.ts`).
 
 ### 2.3 Status
 
 ```ts
-type DeviceMode = 'segments' | 'per_led' | 'idle' | 'released' | 'error';
+type DeviceMode = 'groups' | 'per_led' | 'idle' | 'released' | 'error';
 type ControlReason =
-  | 'auto'                       // segments: normal
-  | 'no_segments'                // per_led: segmentCount = 0
-  | 'per_led_setting'            // per_led: control = per_led
-  | 'override'                   // per_led: identify (per-LED only), pixel finder, test, white test
-  | 'exact_leds'                 // per_led: a visible light partly covers a segment and partialSegments = exact
-  | 'fade_finishing';            // per_led: wants segments, waiting for a running fade to end
+  | 'auto'             // groups: normal
+  | 'groups_off'       // per_led: groupSize = 0
+  | 'too_many_groups'  // per_led: more groups than the tested 24-bit mask
+  | 'per_led_setting'  // per_led: control = per_led
+  | 'override'         // per_led: pixel finder, test chase, white comparison
+  | 'exact_leds'       // per_led: a visible light partly covers a group and partialGroups = exact
+  | 'fade_finishing';  // per_led: wants groups, finishing a fade first
 interface DeviceStatus {
   mode: DeviceMode;
   reason?: ControlReason;
-  /** For exact_leds: names of the lights forcing per-LED; for override: which one. */
+  /** exact_leds: names of the lights forcing per-LED. override: which one. */
   detail?: string[];
   error?: string;
-  /** Per-LED only: colors per frame after downsampling. */
-  sentColors?: number;
+  /** Group count when group control is available. */
+  groups?: number;
 }
 ```
 
-The `streaming` boolean is dropped from status (it's derivable from `mode`).
+`streaming` and `sentColors` are dropped from the status.
 
 ---
 
 ## 3. Backend behaviour
 
-### 3.1 Segment geometry (`src/shared/segments.ts`, pure)
+### 3.1 Group geometry (`src/shared/groups.ts`, pure, used by server and web)
 
-- `segmentBounds(ledCount, count)`: segment *i* = LEDs `[⌊i·n/count⌋, ⌊(i+1)·n/count⌋ − 1]`.
-- `coverage(ranges, ledCount, count)`: per segment, the number of LEDs the light covers.
-- `roundToSegments(ranges, …)`: a segment belongs to the light when coverage ≥ 50 % of its LEDs
-  (exactly 50 % counts as covered). If that leaves the light with **no** segments but it covers at
-  least one LED, it gets the single segment with the most coverage (ties → lowest index). A light
-  never disappears because of rounding.
-- `isAligned(ranges, …)`: every segment's coverage is 0 or 100 %.
+- `groupBounds(ledCount, groupSize)`: group *i* = LEDs `[i·size, min((i+1)·size, ledCount) − 1]`.
+  The last group can be short. On the house strip: 15 × 4, none short.
+- `groupBoundaries(ledCount, groupSize)`: the LED indices where a new group starts (4, 8, …, 56).
+  The **only** source for the dividers drawn in both views (§4.3).
+- `coverage(ranges, ledCount, groupSize)`: per group, how many of its LEDs a light covers.
+- `roundToGroups(ranges, …)`: a group belongs to the light when it covers ≥ 50 % of the group's
+  LEDs (2 of 4 counts). If that leaves no group but the light covers at least one LED, it gets the
+  group it covers most (ties → lowest index). Rounding never makes a light disappear, and
+  moves an edge by at most 2 LEDs.
+- `isAligned(ranges, …)`: every group is covered 0 % or 100 %.
 
 ### 3.2 Planner (`src/server/plan.ts`, pure)
 
 ```ts
 plan(device, lights, states, override, now) →
-  | { control: 'segments'; segments: SegLook[] }   // one entry per segment
+  | { control: 'groups'; groups: GroupLook[] }      // one per group
   | { control: 'per_led'; reason; detail? }
-SegLook = { kind: 'off' } | { kind: 'rgb'; rgb; pct } | { kind: 'white'; kelvin; pct }
+GroupLook = { kind: 'off' } | { kind: 'rgb'; rgb; pct } | { kind: 'white'; kelvin; pct }
 ```
 
 Decision, in order:
 
-1. `segmentCount = 0` → `per_led` / `no_segments`.
-2. `control = per_led` → `per_led` / `per_led_setting`.
-3. An override that needs single LEDs is active (pixel finder, test chase, white test; identify
-   only when the strip is in per-LED mode, see §3.6) → `per_led` / `override`.
-4. `partialSegments = exact` and any visible light isn't aligned → `per_led` / `exact_leds`
+1. `groupSize = 0` → `per_led` / `groups_off`.
+2. More than 24 groups → `per_led` / `too_many_groups`.
+3. `control = per_led` → `per_led` / `per_led_setting`.
+4. An override that needs single LEDs is running (pixel finder, test chase, white comparison)
+   → `per_led` / `override`.
+5. `partialGroups = exact` and any visible light isn't aligned → `per_led` / `exact_leds`
    (detail = those lights' names).
-5. Otherwise → `segments`, with per-segment looks:
-   - Start every segment as `off` (pct 0).
-   - Paint visible lights in paint order (priority, then creation order) over their **rounded**
-     segments. Aligned lights round to themselves.
-   - A light's look at `now`: kind/color/kelvin from its current (or fading) look; `pct` =
-     `max(1, round(brightness/255·100))` × opacity. Opacity comes from the existing transition
-     model (fade per-light opacity, not to black).
-   - Layering with opacity *a* over the look *L* beneath: `pct = a·top.pct + (1−a)·L.pct`;
-     kind/color/kelvin = top's if `a ≥ 0.5`, else L's. Within one light, RGB fades interpolate in
-     RGB and white fades interpolate in mireds. RGB ↔ white swaps kind at the midpoint.
-   - `pct` rounds to an integer; `pct = 0` → `off`.
+6. Otherwise `groups`:
+   - Every group starts `off`.
+   - Visible lights paint in paint order (priority, then creation order) over their **rounded**
+     groups.
+   - A light's look at `now` comes from its state or its running fade. `pct = max(1, round(brightness / 255 × 100))`,
+     scaled by the fade opacity (per-light opacity fades, as today).
+   - Layering with opacity *a* over the look beneath: `pct = a·top + (1−a)·below`. Kind, color and
+     kelvin come from the top look if `a ≥ 0.5`, otherwise from the one beneath. Within one light,
+     RGB fades interpolate in RGB and white fades in mireds. RGB ↔ white swaps at the midpoint
+     (the firmware glide softens it).
+   - A result of `pct` < 0.5 becomes `off`; anything else lit is clamped to 1–100.
 
-The planner never looks at the current mode. Fade-related deferrals live in `decide()`.
+The planner ignores the current mode. Fade-related deferral lives in `decide()`.
 
 ### 3.3 Lifecycle (`decide()`, pure)
 
-Inputs: `enabled`, `released`, `idleBehavior`, `want` (`'none' | 'segments' | 'per_led'`, where
-`none` = nothing visible and no override), `held` (`'none' | 'segments' | 'per_led'`), and
-`fading` (a transition is in progress on this strip).
+Inputs: `enabled`, `released`, `idleBehavior`, `groupsAvailable`, `want`
+(`'none' | 'groups' | 'per_led'`; none = nothing visible and no override), `held`
+(`'none' | 'groups' | 'per_led'`), `fading` (a transition is running on this strip).
 
-Outputs: `actions` (ordered: `segments_all_off`, `turn_on`, `brightness_max`, `enable`,
-`disable`, `turn_off`), `held`, `frame` (`'plan' | 'black' | null`), `mode`.
+Output: `before` (actions), `frame` (`'groups' | 'groups_off' | 'composite' | 'black' | null`),
+`after` (actions), `held`, `mode`, `reason`. Actions: `brightness_max`, `turn_on`, `enable`,
+`disable`, `turn_off`.
 
-**Rules:**
+| # | Condition | before | frame | after | → held / mode |
+|---|---|---|---|---|---|
+| R1 | `!enabled` | held per_led: `disable` | – | – | none / idle |
+| R2 | `released` | held per_led: `disable`. Held groups: nothing, the lights stay (F11: the app takes over when used) | – | – | none / released |
+| R3 | want groups, held none | `brightness_max` | groups | `turn_on` (F10: frames first, then power on, so no flash) | groups / groups |
+| R4 | want groups, held groups | – | groups | – | groups / groups |
+| R5 | want groups, held per_led, **fading** | – | composite | – | per_led / per_led (`fade_finishing`) |
+| R6 | want groups, held per_led, not fading | `disable` | groups | – | groups / groups (F13: clean) |
+| R7 | want per_led, held none | `turn_on`, `brightness_max`, `enable` | composite | – | per_led / per_led |
+| R8 | want per_led, held groups | `enable` | composite | – | per_led / per_led (hard cut, accepted) |
+| R9 | want per_led, held per_led | – | composite | – | per_led / per_led |
+| R10 | want none, idle `off` | held per_led: `disable`, `turn_off`. Held groups: `turn_off` | – | – | none / idle |
+| R11 | want none, idle `release` | held per_led: `disable` (the Govee scene comes back) | held groups: groups_off (all dark, power stays on; nothing comes back by itself) | – | none / idle |
+| R12 | want none, idle `hold_black`, groups available | as R3/R4/R6 | groups_off | as R3 | groups / idle |
+| R13 | want none, idle `hold_black`, groups not available | as R7/R9 | black | – | per_led / idle |
+| R14 | want none, held none, not R12/R13 | – | – | – | none / idle (startup sends nothing, so a restart doesn't kill a Govee scene) |
 
-| # | Condition | Actions | Result |
-|---|---|---|---|
-| R1 | `!enabled` | held `per_led` → `disable` | held none, mode `idle` |
-| R2 | `released` | held `per_led` → `disable`; held `segments` → nothing (the lights stay as they are, see §3.5) | held none, mode `released` |
-| R3 | want `segments`, held `none` | `turn_on`, `brightness_max` | held segments, frame plan |
-| R4 | want `segments`, held `segments` | — | frame plan |
-| R5 | want `segments`, held `per_led`, **fading** | — (**stay per-LED**) | held per_led, frame = per-LED composite, reason `fade_finishing` |
-| R6 | want `segments`, held `per_led`, not fading | `disable` | held segments, frame plan (full) |
-| R7 | want `per_led`, held `none` | `turn_on`, `brightness_max`, `enable` | held per_led |
-| R8 | want `per_led`, held `segments` | `enable` | held per_led (switch immediately; any light fading in starts at 0 % so it doesn't flash) |
-| R9 | want `per_led`, held `per_led` | — | frame per-LED composite |
-| R10 | want `none`, idle `off` | held per_led → `disable`, `turn_off`; held segments → `segments_all_off`, `turn_off` | held none, mode idle |
-| R11 | want `none`, idle `release` | held per_led → `disable`; held segments → `segments_all_off` | held none, mode idle |
-| R12 | want `none`, idle `hold_black`, segments available | as R3/R4/R6 with all segments off | held segments, mode idle |
-| R13 | want `none`, idle `hold_black`, no segments | as R7/R9 with a black frame | held per_led, mode idle |
-| R14 | want `none`, held `none`, any idle | — (startup: send nothing, so a restart doesn't kill a Govee scene) | |
+With group control, `release` and `hold_black` both end with the strip powered and dark. The UI
+says so (§4.1).
 
-"Segments available" = `segmentCount > 0 && control = auto`.
-
-**Invariants** (asserted in tests over the full matrix):
+**Invariants** (asserted over the full input cross-product):
 
 - I1: Leaving `per_led` always starts with `disable`.
-- I2: Segment frames are never sent while held = `per_led` (a `disable` comes before them).
-- I3: A razer frame is never sent while held ≠ `per_led`.
-- I4: `turn_off` from held `segments` always follows `segments_all_off`, so the next `turn on`
-  never flashes the old state.
-- I5: **A fade never causes a switch** from per-LED to segments (R5). The switch to per-LED
-  happens before a fade starts (R8), when the incoming light is invisible.
-- I6: Idle with nothing held sends nothing (R14).
+- I2: No group frame is sent while held is `per_led` (F14: it would override the stream). R5
+  sends the composite instead.
+- I3: Razer frames only when the resulting held is `per_led`.
+- I4: Entering groups from none sends frames before `turn_on`.
+- I5: A fade never causes a per-LED → groups switch (R5).
+- I6: Nothing held + nothing wanted + idle ≠ hold_black → no output at all.
 
 ### 3.4 Engine (`engine.ts`)
 
-- A tick runs the planner, then `decide()`, then sends.
-- **Segments output:** group segments with an identical `SegLook`. Per group: one color frame
-  (white: RGB `FF FF FF`, kelvin, tint = `miredsToRgb`; rgb: RGB with white-balance gains
-  applied, kelvin 0, tint 0; off: all zero) and one brightness frame. Pack them into `ptReal`
-  datagrams of ≤ 8 frames (A7). Coalesce key `segments`, separate from `frame`, so a queued
-  segment datagram can never jump ahead of a `disable`.
-- **Diffing:** send only groups whose segments changed since the last send. Re-send the full
-  state every `keepaliveMs` (A9, A16).
-- **Timing:** on change → next tick at ≥ 33 ms (per-LED) / ≥ 100 ms (segments, `SEGMENT_STEP_MS`,
-  tuned from P9) after the previous one. While fading: per-LED 33 ms, segments 100 ms.
-- `brightness_max` is re-sent every 30 s in both modes. `enable` is re-sent with it in per-LED mode
-  only.
-- **Preview:** the `frame` WebSocket message shows **what is on the strip**. In segment mode, that
-  means the rounded segment looks expanded to LEDs (white shown via `miredsToRgb`). The message
-  gets `mode` and a `whiteLeds: boolean[]` per segment (or a compact range list) so the UI can
-  mark real-white segments.
-- **Shutdown:** held `per_led` → as today (`hold_black` exits like `off`). Held `segments` →
-  **send nothing**: the strip keeps its lights, and the next start re-sends the same state
-  (R4 with held none → R3: `turn_on` is a no-op on a lit strip). Service updates don't blink
-  the lights.
-- **IP change:** held `per_led` → `disable` to the old IP; held `segments` → nothing to the old IP.
-  Then held = none, and the next tick re-enters at the new IP.
+- A tick runs the planner, then `decide()`, then sends `before`, frames and `after`, in order, on
+  the per-IP paced queue.
+- **Group output.** Group the groups by color look and send one color frame per distinct look:
+  - white: RGB 0, kelvin, tint 0 (F5: RGB and tint are ignored);
+  - rgb: RGB with the device's white-balance gains (same LEDs as per-LED, so the colors match), kelvin 0;
+  - off: all 0 (F7).
+  Then one brightness frame per distinct `pct` among lit groups (never 0; F7).
+  Frames are packed ≤ 6 per datagram (F4).
+- **Diffing.** Send only groups whose look changed since the last send. The **full state** is
+  re-sent every 30 s along with `brightness_max` (F9: invisible; covers power cycles and app
+  changes, U2).
+- **Pacing.** Group ticks are at least `GROUP_STEP_MS = 100` apart, including fade steps
+  (F8: smooth with the firmware glide). Per-LED stays at 33 ms. A transition of 0 still glides
+  < 0.5 s in group mode; that's documented, not worked around.
+- **Queueing.** Group datagrams aren't coalesced (one update is up to ~6 datagrams ≈ 90 ms of
+  pacing, which fits in a 100 ms step). Razer frames keep the `frame` coalesce key. When the
+  held mode changes, any queued datagrams of the other kind are dropped before `before` is
+  queued (supports I2).
+- **Brightness pin.** `brightness_max` on entry and every 30 s, in both modes (F12). `enable` is
+  re-sent with it in per-LED mode only.
+- **Preview.** The `frame` message shows **what the strip shows**: in group mode, the rounded
+  group looks expanded to LEDs (white via `miredsToRgb`), plus `mode` and a per-group
+  `realWhite: boolean[]`, so the UI can mark real-white groups.
+- **Shutdown.** Held per_led: as today (`hold_black` exits like `off`). Held groups: **send
+  nothing**; the lights stay (F9). On the next start R3 re-sends the state; frames come before
+  `turn_on`, so nothing blinks.
+- **IP change.** Held per_led: `disable` to the old IP. Held groups: nothing to the old IP. Then
+  held = none and the next tick enters at the new IP.
 
 ### 3.5 Release to Govee
 
-- Held `per_led` → `disable`; the strip goes back to its app scene (as today).
-- Held `segments` → nothing is sent. The strip keeps showing the current segments until
-  something is picked in the Govee app; the app scene does **not** come back on its own. The
-  UI says so (§4.4).
-- Light commands keep being stored. Un-release → R3, full state.
+- Held per_led: `disable`, and the strip goes back to its app scene (as today).
+- Held groups: nothing is sent. The lights stay until something is picked in the Govee app.
+- Light commands keep being stored. Un-release → R3; our state takes over from any app scene (F11).
 
 ### 3.6 Overrides
 
-| Override | Segments available | Otherwise |
+| Override | Group control available | Otherwise |
 |---|---|---|
-| Identify | **Blink the light's rounded segments** in segment mode (no switch; shows the user what the rounding did) | Per-LED blink, as today |
+| Identify | Blink the light's **rounded groups** (700 ms on / 700 ms off, slow enough for the glide) in group mode: no switch, and it shows the rounding | Per-LED blink, as today |
 | Pixel finder | Per-LED (switch, then back) | Per-LED |
 | Test chase | Per-LED | Per-LED |
-| White test (WB tuning) | Per-LED; a new **"Real white" test** fills all segments with white at the same kelvin, so the two can be compared back to back | Per-LED |
+| White balance tuning | A/B toggle: the whole strip in real white ↔ RGB-mixed white at the same kelvin, for tuning the per-LED gains against real white | Per-LED mixed white only |
 
 ### 3.7 MQTT
 
 - Discovery: `ct` → `supported_color_modes: ['color_temp']`, `brightness: true`,
-  `color_temp_kelvin: true`, min/max kelvin from A17. `rgb_ct` removed.
-- State payloads: `ct` → `color_mode: 'color_temp'`, `color_temp` in kelvin. `onoff`/`dimmable`
-  with a white default report as today (HA doesn't show color for those modes).
-- Mode sensor: `options: ['segments', 'per_led', 'idle', 'released', 'error']`. The status topic
-  payload is `{ mode, reason, detail, error }`; `reason`/`detail` show up as attributes in HA.
+  `color_temp_kelvin: true`, `min_kelvin: 2700`, `max_kelvin: 6500`. `rgb_ct` removed.
+- State: `ct` → `color_mode: 'color_temp'`, `color_temp` in kelvin.
+- Mode sensor: `options: ['groups', 'per_led', 'idle', 'released', 'error']`. Status payload
+  `{ mode, reason, detail, error, groups }`; `reason`/`detail` show as attributes.
 
 ### 3.8 Simulate mode
 
-`simulatedTransport` decodes `ptReal`: `[sim] segments 0-3 white 2700K 80% · 4-7 off`, and
-`[sim] segments 8 rgb #ff0000 100%`.
+`simulatedTransport` decodes `ptReal`, e.g. `[sim] groups 1-4 white 2700K 80% · 5-15 off`.
 
 ### 3.9 CLI
 
-Covered in the testing plan (`pnpm cli seg …`, `pnpm cli probe`).
+`pnpm cli probe` (rounds 1 and 2) and `pnpm cli seg …` stay as hardware tools.
 
 ---
 
 ## 4. UI
 
-Goal: every setting explains its tradeoff in place, and every automatic decision is visible with
-its reason.
+Every setting explains its tradeoff in place, every automatic decision shows its reason, and the
+groups are always visible.
 
-### 4.1 Device form — new "Segments" section
+### 4.1 Device form: "Groups" section
 
-- **Segments** (number). Help: *"Number of segments shown for this strip in the Govee app. Segment
-  control is off until this is set."*
-- **Control method** (radio, disabled with that help text while segments = 0):
-  - **Automatic** (recommended). *"Uses segment control whenever it can: real white LEDs, and
-    the strip keeps its lights even if govee-zones stops. Switches to per-LED control only when
-    something needs single LEDs, like the pixel finder."*
-  - **Per-LED only.** *"Always controls individual LEDs. Every light is exact to the LED, but
-    white is mixed from RGB (pinker and dimmer), and the strip goes back to its Govee scene about
-    a minute after govee-zones stops. Use this if segment control misbehaves on your strip."*
-- **Lights that don't line up with segments** (radio, only for Automatic):
-  - **Round to whole segments** (default). *"Keeps real white and segment control. The light grows
-    or shrinks to the nearest segment boundary."*
-  - **Use exact LEDs.** *"Keeps the exact LED range by switching the whole strip to per-LED control
-    while that light is on. Other lights on the strip lose real white during that time."*
+- **LEDs per group** (number, default 4). Help: *"How many LEDs the strip controls together.
+  4 on the H805A. 0 turns group control off."* Shows the result: *"15 groups"*, or the warning
+  *"31 groups: more than the 24 that have been tested. This strip uses per-LED control."*
+- **Control method** (radio):
+  - **Automatic** (recommended). *"Uses group control whenever it can: real white that matches
+    the Govee app, and the strip keeps its lights even if govee-zones stops. Switches to per-LED
+    control only for single-LED tools like the pixel finder."*
+  - **Per-LED only.** *"Always controls single LEDs. Changes are instant, but white is mixed from
+    RGB (slightly off-color), and the strip goes back to its Govee scene about a minute after
+    govee-zones stops."*
+- **Lights that don't line up with groups** (radio, Automatic only):
+  - **Round to whole groups** (default). *"Keeps real white and group control. A light's edge
+    moves by at most 2 LEDs to the nearest group boundary."*
+  - **Use exact LEDs.** *"Keeps exact LED ranges by switching the whole strip to per-LED control
+    while such a light is on. Other lights lose real white during that time."*
+- **When all lights are off** gets group-aware labels: *Turn strip off* · *Go dark, leave power
+  on* (`release` and `hold_black` with group control: the Govee scene doesn't come back by itself)
+  · *Hand back to the Govee app* (per-LED `release` only).
+- A one-line note under the section: *"Group control changes glide over about half a second;
+  that's the strip's firmware."*
 
 ### 4.2 Mode badge (strip page, device card)
 
-| Mode | Badge | Tooltip / popover text |
+| Mode / reason | Badge | Tooltip / popover |
 |---|---|---|
-| segments | **Segments** | "Real white LEDs. The strip holds its lights on its own." |
-| per_led / no_segments | **Per-LED** | "Segment count isn't set for this strip." + link to the setting |
+| groups | **Groups** | "Real white. The strip holds its lights on its own." |
+| per_led / groups_off | **Per-LED** | "Group control is off for this strip (LEDs per group = 0)." + link to the setting |
+| per_led / too_many_groups | **Per-LED** | "This strip has more groups than have been tested (24)." |
 | per_led / per_led_setting | **Per-LED** | "Control method is set to Per-LED only." |
-| per_led / override | **Per-LED** | "Pixel finder running." / "Test running." — returns to Segments when done |
-| per_led / exact_leds | **Per-LED** | "Gutter uses exact LEDs and is on. White lights are mixed from RGB until it turns off." |
-| per_led / fade_finishing | **Per-LED** | "Finishing a fade; switches to Segments after." |
-| idle / released / error | as today | Released (segments): "Lights stay as they are until you pick something in the Govee app." |
+| per_led / override | **Per-LED** | "Pixel finder running." / "Test running." Returns to Groups when done |
+| per_led / exact_leds | **Per-LED** | "Gutter uses exact LEDs and is on. White is mixed from RGB until it turns off." |
+| per_led / fade_finishing | **Per-LED** | "Finishing a fade; switches to Groups after." |
+| idle / released / error | as today | Released with groups: "Lights stay as they are until you change them in the Govee app." |
 
-The popover also has a two-line "Segments vs Per-LED" explainer (same text as §0's table).
+The popover also has a short "Groups vs Per-LED" explainer (the §0 table in two lines).
 
-### 4.3 Strip view / house view
+### 4.3 Strip view and house view
 
-- **Required: group dividers are always visible in both views** whenever segment control is
-  available (group size set and the strip fits the mask). A group is the smallest unit segment
-  control can drive (4 LEDs on the H805A test strip).
-  - **Strip view:** a divider line between every pair of groups, clearly heavier than the gaps
-    between single LEDs. The cells of one group read as one block (e.g. alternating subtle
-    background bands per group).
-  - **House view:** a short tick across the traced outline at every group boundary, placed at
-    the boundary's LED position on the path, so the dividers follow corners and bends. They
-    scale with zoom, stay readable over the background photo (contrasting halo), and are
-    drawn above the background and below the LED dots.
-  - Both views share one helper that turns `groupSize`/`ledCount` into boundary LED indices,
-    so the two views can't disagree.
-  - Dividers stay visible in per-LED mode too (dimmed), so it's always clear where lights
-    will round to.
-- **Selection snaps to whole segments** by default when segments are set; a "Fine (single LEDs)"
-  toggle in the tool bar turns snapping off.
-- In segment mode the preview shows the rounded result. Segments lit with real white get a subtle
-  marker (thin outline or "W" dot), so real and mixed white can be told apart.
+- **Group dividers are required and always visible in both views** whenever group control is
+  available. A group is the smallest unit group control can drive (4 LEDs here).
+  - **Strip view:** a divider line between groups, clearly heavier than the gaps between single
+    LEDs; the cells of one group read as one block (alternating subtle background bands).
+  - **House view:** a short tick across the traced outline at every group boundary, at that
+    LED's position on the path, so dividers follow corners and bends. They scale with zoom,
+    have a contrasting halo over the background photo, and are drawn above the photo and below
+    the LED dots.
+  - Both views use `groupBoundaries()` (§3.1), so they can't disagree.
+  - In per-LED mode the dividers stay, dimmed, so it's always clear where lights will round to.
+- **Selection snaps to whole groups** by default; a "Fine (single LEDs)" toggle in the toolbar
+  turns snapping off.
+- In group mode the preview shows the rounded result. Real-white groups get a subtle marker (a
+  thin outline or "W" dot), so real and mixed white can be told apart.
 
-### 4.4 Light row / editor
+### 4.4 Light row and editor
 
-- Capability select: On/off · Dimmable · RGB · White (color temp).
-- Default look for On/off and Dimmable: a **Color / White** toggle, then a color picker or kelvin
-  slider (labelled in K).
-- The light row's subtitle shows coverage:
-  - Aligned: `White · segments 6–7`
-  - Rounded (round mode): `White · LEDs 118–161 → rounded to segments 6–7` with a ⓘ explaining rounding
-  - Partial (exact mode): `RGB · LEDs 118–161 · ⚠ uses exact LEDs: the strip switches to Per-LED while this is on`
-- A `ct` light while the strip is Per-LED: a small "mixed white" chip with the reason.
-- Release notice in segment mode: *"Released. govee-zones stopped sending. The lights stay as they
-  are until you change them in the Govee app."*
+- Capability: On/off · Dimmable · RGB · White (color temperature).
+- Default look for On/off and Dimmable: a **Color / White** toggle, then a color picker or a
+  kelvin slider (2700–6500 K, labelled in K).
+- The subtitle shows coverage:
+  - aligned: `White · groups 6–7`
+  - rounded: `White · LEDs 22–29 → groups 6–7` with ⓘ explaining rounding
+  - exact mode, partial: `RGB · LEDs 22–29 · ⚠ uses exact LEDs: the strip switches to Per-LED while this is on`
+- A `ct` light while the strip is Per-LED gets a small "approximate white" chip with the reason.
 
-### 4.5 "How control works" help panel
+### 4.5 "How control works" panel
 
-A collapsible panel on the Devices page: the §0 table, the rounding rule with a small diagram, and
-"what forces Per-LED" (pixel finder/test, exact-LED lights, Per-LED only setting).
+A collapsible panel on the Devices page: the §0 table, the rounding rule with a small diagram of
+a group, and what forces Per-LED (single-LED tools, exact-LED lights, the Per-LED only setting,
+too many groups).
 
 ---
 
 ## 5. Build order
 
-1. Probe CLI + run the probe on hardware (testing plan §1). **Gate:** A1–A9 confirmed, or the plan
-   is revised.
-2. Protocol encoder + geometry + planner + `decide()` with the full test matrix (testing plan §2).
-3. Engine integration + simulate decoding + engine scenario tests.
-4. Data model changes (`ct`, `look`, device fields, status) + MQTT + tests.
-5. UI (§4) + manual pass in `pnpm dev:sim`.
-6. Hardware acceptance checklist (testing plan §3), then update `CLAUDE.md`/`SPEC.md`/README.
+1. Geometry (`groups.ts`) + planner + `decide()` with the full test matrices (testing plan §2).
+2. Protocol packing + engine integration + simulate decoding + engine scenarios.
+3. Data model (`ct`, `look`, device fields, status) + commands + MQTT + their tests.
+4. UI (§4), with the group dividers first, then a manual pass in `pnpm dev:sim`.
+5. Hardware acceptance checklist (testing plan §3), then update `CLAUDE.md`, `SPEC.md` and the README.
 
 ---
 
@@ -352,16 +373,16 @@ A collapsible panel on the Devices page: the §0 table, the rounding rule with a
 For **this strip's lighting**, mostly yes: on/off, brightness, RGB and real white per zone, fully
 local, plus things govee2mqtt can't do (zones as separate HA lights, priorities, per-LED fallback).
 
-It still doesn't cover:
+Still not covered:
 
 | Gap | Why |
 |---|---|
-| Govee scenes, DIY effects, music mode | Out of scope (animation/scenes). |
-| Reading state back | We only send. If someone changes the strip in the Govee app, HA keeps showing our state. govee2mqtt reads device status over LAN (4002) / cloud. |
-| Whole-strip entity / power state as Govee sees it | Ours are virtual lights; there's no single "the strip" light entity. |
-| Other Govee devices, discovery | Manual IP per strip, by design (UDP 4002 stays with govee2mqtt). |
-| Govee-side timers/schedules, cloud features | No cloud. |
+| Govee scenes, DIY effects, music mode | Out of scope (animations, scenes) |
+| Reading state back | We only send. A change made in the Govee app isn't reflected in HA |
+| A whole-strip power entity as Govee sees it | Ours are virtual lights |
+| Other Govee devices, discovery | Manual IP per strip, by design (UDP 4002 stays with govee2mqtt) |
+| Govee timers and schedules, cloud features | No cloud |
 
-So it can replace govee2mqtt **for this strip** if you don't use scenes or effects and don't
-change the strip from the Govee app. Keep govee2mqtt for other Govee devices, and for scenes
-reached through "Release to Govee".
+So it can replace govee2mqtt **for this strip** if scenes and effects aren't used and the strip
+isn't changed from the Govee app. Keep govee2mqtt for other Govee devices, and use "Release to
+Govee" to get to scenes.
