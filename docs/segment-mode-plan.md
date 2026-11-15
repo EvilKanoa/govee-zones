@@ -1,9 +1,10 @@
 # Segment mode — implementation plan
 
-Status: **draft, not started.** Every behaviour below rests on assumptions about the H805A
-that are still unverified (listed in §1). The probe plan in
-[`segment-mode-testing.md`](segment-mode-testing.md) checks them on hardware before
-any of this is built. If an assumption fails, its row in §1 says what changes.
+Status: **draft, not started.** Round 1 of the hardware probe is done, and its results change
+parts of this plan. The biggest change: the addressable unit is a **group of 4 LEDs**, not the
+Govee app's segments. See [`segment-mode-results.md`](segment-mode-results.md) ("Impact on the
+plan"). That doc overrides this one where they disagree. This plan gets rewritten once round 2
+is in.
 
 This is v0, so there's no compatibility layer anywhere: `rgb_ct` is removed, and status
 modes are renamed outright.

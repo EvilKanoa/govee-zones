@@ -12,10 +12,11 @@ Companion to [`segment-mode-plan.md`](segment-mode-plan.md). There are three par
 
 ## 1. Hardware probe CLI
 
-The strip has **5 segments** (H805A, per the Govee app). Segments count **from 1** in the CLI
-and the probe, as in the Govee app. Protocol masks are 0-based internally.
+Results and what they mean: [`segment-mode-results.md`](segment-mode-results.md). Round 1 found
+that each mask bit drives a **group of 4 LEDs**; what round 1 calls "segments" are those groups.
+Groups count **from 1** in the CLI and the probe. Protocol masks are 0-based internally.
 
-### 1.1 Guided probe: `pnpm cli probe --ip <ip> --segments 5`
+### 1.1 Round 1: `pnpm cli probe --ip <ip> --segments 5` (done)
 
 Five tests. Each one puts the strip in a known state, or steps between states when you press
 Enter, then asks what you see. Answers are multiple choice plus an optional note. They're saved
@@ -56,7 +57,22 @@ Not probed up front (lower risk, covered by the acceptance checklist in §3): ap
 (A10), LAN brightness interaction (A13), resend blink (A16), full kelvin range (A17), power cycle
 (A18).
 
-### 1.2 Raw commands: `pnpm cli seg …`
+### 1.2 Round 2: `pnpm cli probe --round 2 --ip <ip>`
+
+Re-checks round 1's uncertain answers in ways that are harder to misread (large areas, A/B on
+the same LEDs), and covers the rest. Every animation can be replayed (`r`) before answering.
+Answers go to `$DATA_DIR/probe-r2-<time>.json`.
+
+| # | Test | What the strip shows | Questions | Settles |
+|---|---|---|---|---|
+| 1 | **Groups** | All 24 mask bits lit red, green, blue, … from the start | Reaches the end? How many blocks? All 4 LEDs? | Group count and size; the rest of the round uses the counted number |
+| 2 | **White** | Half real white / half RGB-mixed, swapping on Enter, at 2700 K and then 6500 K. Then a kelvin sweep (2000–9000 K). Then 5 ways of sending 2700 K (RGB and tint fields varied) | Different from mixed? Like the app's? Which is brighter? Range where kelvin stops changing? Up close, is warm white a cool LED plus RGB? Which field variants change the look? | Real white at both ends (A3), kelvin range (A17), which bytes matter |
+| 3 | **Off vs minimum** | Quarters: brightness 0 · brightness 1 % · RGB 0 + kelvin 0 · on | Which are dark? Is 0 the same as 1 %? | Off method, minimum brightness (A6) |
+| 4 | **Firmware glide** | Brightness jumps 5 ↔ 100 %; color jumps red ↔ blue; the same state re-sent 10× at 2/s (all repeatable) | Snap or glide (and how long)? Any blink on re-send? | Fade stepping (A8), refresh (A16) |
+| 5 | **Switch back** | Warm white → per-LED blue 3 s → back, three ways: A disable then segments; B segments while per-LED is on, 1.5 s, then disable; C both together (all repeatable) | Clean, or what flashed? For B: did it change while per-LED was still on? | Switch order and dwell (A11, A12) |
+| 6 | **Govee app** | You start an app scene, then warm white is sent. Then LAN brightness flips 100 ↔ 50 | Did the scene stop everywhere? Does LAN brightness dim? | A10, A13 |
+
+### 1.3 Raw commands: `pnpm cli seg …`
 
 For follow-up checks after the probe. They use the same encoder as the service.
 

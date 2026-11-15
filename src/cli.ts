@@ -4,6 +4,7 @@ import * as proto from './server/protocol.js';
 import { udpTransport, type Transport } from './server/transport.js';
 import { miredsToRgb } from './shared/color.js';
 import { runProbe } from './probe.js';
+import { runProbeRound2 } from './probe2.js';
 
 const USAGE = `usage: pnpm cli <command> --ip <strip-ip> [options]
 
@@ -16,7 +17,8 @@ commands:
   pixel <index>       light one LED white (holds until Ctrl-C)
   chase               run a dot along the strip (until Ctrl-C)
 
-  probe               guided segment-mode probe (docs/segment-mode-testing.md); needs --segments
+  probe               guided segment-mode probe (docs/segment-mode-testing.md)
+                      --round 1 (default; needs --segments) or --round 2 (finds the group count itself)
   seg color <segs> <r> <g> <b>   segment RGB (kelvin 0)
   seg white <segs> <kelvin>      segment white LEDs
   seg bright <segs> <0-100>      per-segment brightness
@@ -43,6 +45,7 @@ const { values, positionals } = parseArgs({
     keepalive: { type: 'string', default: '2000' },
     'no-turn': { type: 'boolean', default: false },
     segments: { type: 'string' },
+    round: { type: 'string', default: '1' },
     'mask-bytes': { type: 'string', default: '3' },
     msb: { type: 'boolean', default: false },
     dry: { type: 'boolean', default: false },
@@ -141,6 +144,16 @@ async function segCommand(sub: string | undefined, rest: string[]) {
 
 switch (cmd) {
   case 'probe':
+    if (values.round === '2') {
+      await runProbeRound2({
+        ip,
+        dataDir: process.env.DATA_DIR ?? './data',
+        dry: values.dry,
+        send: (b) => send(b),
+        groups: values.segments ? Number(values.segments) : undefined,
+      });
+      break;
+    }
     if (!values.segments) throw new Error('probe needs --segments <n> (the number of segments in the Govee app)');
     await runProbe({
       ip,
