@@ -1,176 +1,240 @@
 # govee-zones
 
-Split one Govee RGBIC strip (e.g. H805A Permanent Outdoor Lights Elite) into independent **virtual lights**, controlled fully locally over the LAN "razer"/DreamView streaming protocol. See [`SPEC.md`](SPEC.md) for the full design.
+Split one Govee RGBIC light strip into several independent lights for Home Assistant, controlled entirely over your local network.
 
-> **Status:** the web UI, compositor, streaming lifecycle, MQTT / Home Assistant bridge, protocol CLI and Docker packaging are implemented. Without `MQTT_HOST` the service runs with the web UI only.
+Permanent outdoor lights such as the Govee H805A usually run as one long strip. govee-zones lets you draw zones on it (front porch, garage, gutter, accents) and exposes each zone as its own light in Home Assistant, with on/off, brightness, color or color temperature. Zones can overlap and have priorities. A web UI lets you pick zones on a picture of your house.
 
-## Requirements
+- **Fully local.** It talks to the strip over the Govee LAN API. No cloud, no account.
+- **Real white.** It drives the strip with the same segment commands the Govee app uses, so white comes from the strip's dedicated white LEDs and matches the Govee app (2700–6500 K).
+- **Holds its own state.** In normal operation the strip keeps showing your lights even if govee-zones restarts or stops.
+- **Home Assistant via MQTT Discovery.** It needs no YAML: each strip shows up as a device, with one light entity per zone.
+- **Web UI that works on phones.** Select LEDs on a strip view or on a traced outline over a photo of your house.
 
-- Node 22.12+ (the repo pins Node 24 via Volta)
-- pnpm
+> govee-zones is an unofficial project and isn't affiliated with Govee. It uses undocumented LAN commands, so firmware updates could change how they behave.
 
-## Running locally
+## Contents
 
-```sh
-pnpm install
-pnpm dev:sim      # simulate: logs datagrams instead of sending UDP
-pnpm dev          # real UDP to your strip(s)
+- [What you need](#what-you-need)
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Set up your strip](#set-up-your-strip)
+- [Home Assistant](#home-assistant)
+- [Configuration](#configuration)
+- [Behavior and limitations](#behavior-and-limitations)
+- [Troubleshooting](#troubleshooting)
+- [Upgrading](#upgrading)
+- [Development](#development)
+
+## What you need
+
+- **A Govee RGBIC strip with LAN control.** Developed and tested on the **H805A Permanent Outdoor Lights Elite** (60 LEDs). Other RGBIC models with LAN control may work. If group control doesn't behave on yours, use the *Per-LED only* setting described below.
+- **LAN Control turned on** for the strip in the Govee Home app (device settings).
+- **A fixed IP address for the strip.** Give it a static DHCP lease in your router; govee-zones is configured by IP and doesn't scan the network.
+- **A Docker host** (or Node.js 22.12+ to run it directly).
+- **Optional: an MQTT broker and Home Assistant.** Without MQTT, the service runs with the web UI only.
+
+## How it works
+
+The strip understands two local commands, and govee-zones picks one per strip automatically:
+
+| | **Groups** (normal mode) | **Per-LED** (fallback) |
+|---|---|---|
+| Resolution | Groups of LEDs (4 on the H805A) | Single LEDs |
+| White | The strip's real white, matching the Govee app | Mixed from RGB: about as bright, slightly off-color |
+| If govee-zones stops | The lights stay as they are | The strip freezes on its last frame |
+| Changes | Glide over about half a second (strip firmware) | Instant |
+
+Group mode is used whenever it can be. A zone that doesn't line up with the groups is rounded to whole groups by default: its edges move by at most 2 LEDs, and the UI shows exactly how. Per-LED mode is only used:
+- for the pixel finder and test chase,
+- for zones you set to *Use exact LEDs*,
+- for strips set to *Per-LED only*,
+- for strips with more than 24 groups (wider strips haven't been tested).
+
+The web UI always shows which mode a strip is in, and why.
+
+## Install
+
+### Docker Compose
+
+```yaml
+services:
+  govee-zones:
+    image: ghcr.io/evilkanoa/govee-zones:latest
+    container_name: govee-zones
+    restart: unless-stopped
+    ports:
+      - "8737:8080"          # web UI on http://<host>:8737
+    environment:
+      MQTT_HOST: 192.168.1.10   # leave out to run without Home Assistant
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+    volumes:
+      - ./data:/data
+    stop_grace_period: 10s
 ```
 
-Open http://localhost:5173 (Vite dev server; it proxies `/api` and `/ws` to the backend on `WEB_PORT`, default 8080). Dev data is stored in `./data`.
-
-Production-style:
-
 ```sh
-pnpm build
-DATA_DIR=./data node dist/server/server/main.js   # UI served on http://localhost:8080
+docker compose up -d
 ```
 
-## Docker
+The repo's [`docker-compose.yml`](docker-compose.yml) builds from source instead and adds a healthcheck. No UDP ports need to be published: the container only sends to `<strip-ip>:4003`, so bridge networking works. It never binds UDP 4002, so it can run on the same host as other Govee LAN tools.
 
-The image is a multi-stage `node:24-alpine` build that serves the UI on container port 8080 and keeps everything in `/data`. The compose example and Unraid template map it to host port **8737**, to avoid the usual 8080 clashes. It includes a healthcheck that polls `/healthz`. Bridge networking is fine: the container only sends UDP to `<strip-ip>:4003` and never binds UDP 4002. No UDP ports need to be published.
+### docker run
 
 ```sh
-docker compose up -d --build     # uses docker-compose.yml; edit the MQTT settings first
-# or
-docker build -t govee-zones .
-docker run -d --name govee-zones -p 8737:8080 -v ./data:/data \
-  -e MQTT_HOST=192.168.1.10 -e MQTT_USERNAME=… -e MQTT_PASSWORD=… govee-zones
+docker run -d --name govee-zones --restart unless-stopped \
+  -p 8737:8080 -v ./data:/data --stop-timeout 10 \
+  -e MQTT_HOST=192.168.1.10 -e MQTT_USERNAME=… -e MQTT_PASSWORD=… \
+  ghcr.io/evilkanoa/govee-zones:latest
 ```
 
-`docker stop` sends SIGTERM, and the service exits streaming on each strip before stopping. Keep the stop timeout at 10 s or more.
-
-**Published image.** `.github/workflows/docker.yml` runs typecheck and tests, then pushes `ghcr.io/evilkanoa/govee-zones` for amd64 and arm64. It tags `latest` from `main`, plus `vX.Y.Z` tags and `sha-…`. GHCR packages start out private: make the package public (GitHub → Packages → govee-zones → Package settings) or `docker login ghcr.io` on the host before pulling.
+Images are published for amd64 and arm64: `latest` from `main`, plus `vX.Y.Z` and `sha-…` tags.
 
 ### Unraid
 
-The image must be pullable first (see *Published image* above). Give each strip a static DHCP lease, because devices are configured by IP.
-
-**With the template**
-
-1. Copy `unraid/govee-zones.xml` to `/boot/config/plugins/dockerMan/templates-user/` on the server. If the repo is public, this does it:
+1. Download the template to the server:
    ```sh
    wget -O /boot/config/plugins/dockerMan/templates-user/my-govee-zones.xml \
      https://raw.githubusercontent.com/EvilKanoa/govee-zones/main/unraid/govee-zones.xml
    ```
-2. Go to *Docker → Add Container*, then open the **Template** dropdown and pick **govee-zones** under *User templates*.
-3. Fill in the MQTT host, username and password. The port (8737) and appdata path (`/mnt/user/appdata/govee-zones`) are prefilled. The discovery prefix, base topic, log level and simulate options are under *Show more settings*.
-4. *Apply*. The web UI is at `http://<unraid-ip>:8737`. The container's WebUI menu entry links there too.
+2. *Docker → Add Container*, then pick **govee-zones** under *User templates*.
+3. Fill in the MQTT host and credentials. The port (8737) and appdata path (`/mnt/user/appdata/govee-zones`) are prefilled; the other settings are under *Show more settings*.
+4. *Apply*, then open `http://<unraid-ip>:8737`.
 
-**Without the template**
+<details>
+<summary>Without the template</summary>
 
-Go to *Docker → Add Container* and fill in the fields by hand:
+*Docker → Add Container*:
 
 | Field | Value |
 |---|---|
-| Name | `govee-zones` |
 | Repository | `ghcr.io/evilkanoa/govee-zones:latest` |
 | Network Type | `bridge` |
 | WebUI | `http://[IP]:[PORT:8080]/` |
-| Extra Parameters | `--stop-timeout 10` (time to exit streaming cleanly) |
+| Extra Parameters | `--stop-timeout 10` |
+| Port (TCP) | container `8080` → host `8737` |
+| Path | container `/data` → `/mnt/user/appdata/govee-zones` |
+| Variables | `MQTT_HOST`, `MQTT_PORT` (1883), `MQTT_USERNAME`, `MQTT_PASSWORD` |
 
-Then use *Add another Path, Port, Variable, Label or Device* for each of these:
+</details>
 
-| Config type | Name | Container side | Host side / value |
-|---|---|---|---|
-| Port (TCP) | Web UI | `8080` | `8737` |
-| Path (read/write) | Data | `/data` | `/mnt/user/appdata/govee-zones` |
-| Variable | MQTT host | `MQTT_HOST` | your broker's IP or hostname |
-| Variable | MQTT port | `MQTT_PORT` | `1883` |
-| Variable | MQTT username | `MQTT_USERNAME` | (if your broker needs one) |
-| Variable | MQTT password | `MQTT_PASSWORD` | (if your broker needs one) |
-
-`MQTT_DISCOVERY_PREFIX`, `MQTT_BASE_TOPIC`, `LOG_LEVEL` and `SIMULATE` are optional. The defaults are in the Environment table below. *Apply*, then open `http://<unraid-ip>:8737`. You can also run `docker run` from the Unraid terminal (see above), but the container then won't appear as editable in the Docker tab.
-
-### Moving from a local dev instance
-
-Use *Export* in the web UI of the instance you've been testing, then *Import* into the container. IDs are preserved, so the HA entities carry over. Stop the dev instance first if it uses the same `MQTT_BASE_TOPIC`. House photos aren't included in the export. Copy `data/backgrounds/*.jpg` into the appdata `backgrounds/` folder if you want them.
-
-### Environment
-
-| Var | Purpose | Default |
-|---|---|---|
-| `MQTT_HOST` | Broker host or URL (`mqtt://`, `mqtts://`, `ws://`). The bridge is disabled when unset. | — |
-| `MQTT_PORT` | Broker port | `1883` |
-| `MQTT_USERNAME` / `MQTT_PASSWORD` | Broker auth | — |
-| `MQTT_DISCOVERY_PREFIX` | HA discovery prefix | `homeassistant` |
-| `MQTT_BASE_TOPIC` | Topic root | `govee-zones` |
-| `WEB_PORT` | Web UI / API port | `8080` |
-| `DATA_DIR` | Persistent storage | `/data` (`./data` in `pnpm dev`) |
-| `LOG_LEVEL` | `debug` shows every frame in simulate mode | `info` |
-| `SIMULATE` | Log datagrams instead of sending | `false` |
-
-## Home Assistant (MQTT)
-
-Set `MQTT_HOST` (and credentials, if any) and the service announces itself through MQTT Discovery. Nothing needs to be configured in HA. To try it against your real broker before deploying:
+### Without Docker
 
 ```sh
-MQTT_HOST=192.168.x.x MQTT_USERNAME=… MQTT_PASSWORD=… pnpm dev
+pnpm install
+pnpm build
+DATA_DIR=./data node dist/server/server/main.js   # web UI on http://localhost:8080
 ```
 
-The topbar shows an **MQTT** dot (green when connected). Each strip becomes one HA device with:
+## Set up your strip
 
-- **One light per virtual light**, using the JSON schema. Supported modes follow the light's capability: `onoff`, `brightness`, `rgb`, or `rgb` + `color_temp` (in kelvin, 2000–6535 K). Transitions are honoured.
-- A **Release to Govee** switch (config). ON stops streaming so the Govee app or govee2mqtt can take over. Commands are still stored.
-- A **Mode** sensor (diagnostic): `streaming`, `idle`, `released` or `error`. The error message is available as an attribute.
+1. **Add the strip.** *Devices → Add strip*: a name, its IP address and its LED count. Leave *LEDs per group* at 4 for the H805A. *How control works* on the Devices page explains the settings. *Test* runs a chase along the strip, so you can confirm it's reachable.
+2. **Make zones.** Open the strip and drag across the LEDs. Selections snap to whole groups; tick *Fine* to pick single LEDs. Then click *New light*. Each light becomes one Home Assistant entity.
+3. **Pick a type for each light** (*Edit*):
+   - **White**: color temperature and brightness, using the strip's real white. This is the usual choice for everyday lighting.
+   - **RGB**: any color and brightness.
+   - **On/off**: always the same look (a color or a white), switched on and off.
+4. **Map it to your house** (optional). Switch to *House*, choose *Edit outline*, optionally add a photo, and tap along the roofline in LED order. Use *Pixel finder* to find which LED is at each corner, and pin those points to their LED numbers.
+5. **Check it.** *Identify* blinks a light on the real strip. Dividers in both views mark the groups. If a zone doesn't line up with them, arrows show which way each edge moves when it's rounded, and *As set / Rounded* compares the two.
 
-Topics, with `<base>` = `MQTT_BASE_TOPIC`:
+Where zones overlap, the one higher in the light list wins. Drag lights to reorder them, or use ▲▼ on a phone.
+
+## Home Assistant
+
+Set `MQTT_HOST` (and credentials, if your broker needs them). govee-zones then announces itself through MQTT Discovery; nothing needs to be configured in Home Assistant. A dot in the web UI's top bar shows the MQTT connection.
+
+Each strip becomes one device with:
+
+- **One light per zone** (JSON schema), with modes matching its type: On/off, RGB with brightness, or White (`color_temp` in kelvin, 2700–6500 K) with brightness. Transitions are honored.
+- **Release to Govee** switch: hands the strip back to the Govee app (for its scenes and effects). Light changes are still saved and apply when you turn it off.
+- **Mode** sensor: `groups`, `per_led`, `idle`, `released` or `error`. The `reason` and `detail` attributes say why.
+
+Renaming or deleting a light updates or removes its entity. Entity IDs come from the light IDs, so use *Export* / *Import* in the web UI to move a setup between instances without losing your entities.
+
+<details>
+<summary>MQTT topics</summary>
+
+With `<base>` = `MQTT_BASE_TOPIC`:
 
 | Topic | Payload |
 |---|---|
-| `<base>/status` | `online` / `offline` (retained; LWT) |
+| `<base>/status` | `online` / `offline` (retained; last will) |
 | `<base>/light/<id>/set` · `/state` | HA JSON-schema command / retained state |
 | `<base>/device/<id>/release/set` · `/state` | `ON` / `OFF` |
-| `<base>/device/<id>/status` | `{"mode":…,"error":…,"sent_colors":…}` (retained) |
+| `<base>/device/<id>/status` | `{"mode":…,"reason":…,"detail":…,"error":…,"groups":…}` (retained) |
 | `<prefix>/<component>/<base>/<id>/config` | discovery |
 
-Renaming, editing or deleting a light in the UI updates or removes its HA entity. When the service starts, it also clears retained discovery configs under its node id for anything that no longer exists. Entity IDs come from the light/device IDs, so **export your config and import it on the deployed instance** to keep the same HA entities. Only run one instance per `MQTT_BASE_TOPIC` at a time. For a throwaway test, use a different base topic (e.g. `govee-zones-dev`) and delete that HA device afterwards.
+</details>
 
-## Using the web UI
+## Configuration
 
-Works on phones (touch drag-select and brush-select, ▲▼ priority buttons).
+All settings are environment variables. Everything else is configured in the web UI and stored in `DATA_DIR`.
 
+| Variable | Purpose | Default |
+|---|---|---|
+| `MQTT_HOST` | Broker host or URL (`mqtt://`, `mqtts://`, `ws://`). Without it, MQTT is off. | — |
+| `MQTT_PORT` | Broker port | `1883` |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | Broker credentials | — |
+| `MQTT_DISCOVERY_PREFIX` | Home Assistant discovery prefix | `homeassistant` |
+| `MQTT_BASE_TOPIC` | Topic root; use a different one per instance | `govee-zones` |
+| `WEB_PORT` | Web UI / API port inside the container | `8080` |
+| `DATA_DIR` | Config, light state and house photos | `/data` |
+| `LOG_LEVEL` | `info`, or `debug` to log every command sent | `info` |
+| `SIMULATE` | `true` logs commands instead of sending them | `false` |
 
-1. **Devices** → *Add strip*: name, IP (use a static DHCP lease), LED count. *Test* runs a chase.
-2. Open the strip. Each cell is one LED: the top shows the live output, the bottom bar shows which light(s) own it (striped where lights overlap).
-3. Drag across cells to select (shift-drag to add), then *New light from selection* or add/remove the selection from an existing light.
-4. **Identify** flashes a light's LEDs on the real strip. **Pixel finder** lights a single LED when you click a cell — use these to map indices to positions on the house.
-5. Reorder lights by dragging, or with ▲▼ on touch screens; the top of the list wins where lights overlap.
-6. **House view** (toggle *Strip / House*): *Edit outline*, optionally *Add house photo*, then tap along the roofline in LED order. LEDs are spread evenly between points; tap a point to pin it to its real LED number (find corners with the pixel finder). In the house view, drag to brush-select LEDs. The photo is stored in `DATA_DIR/backgrounds/` and isn't included in exports.
-7. **Release to Govee** stops streaming so the Govee app / govee2mqtt can run scenes. Light changes made while released are saved and applied when you turn it off again.
-8. *Export* / *Import* back up the device and light configuration as JSON.
+## Behavior and limitations
 
-## Protocol CLI (hardware verification)
+- **govee-zones owns the strip unless it's released.** With lights on, it shows them; with every light off, it keeps the strip off. Every 30 s it re-sends that state, so a change made elsewhere (the Govee app, a voice assistant, a schedule, or the strip coming back on after a power cut) is undone within half a minute. To use the Govee app or its scenes, turn on **Release to Govee**: govee-zones then sends nothing until you turn it off again.
+- **Restarts don't blink the lights.** At startup, strips whose lights were on pick up where they left off, strips with every light off are turned off, and released strips are left alone. On a clean shutdown, group mode sends nothing (the lights stay); per-LED mode exits and turns the strip off.
+- **Per-LED white is approximate.** In group mode white is the strip's own. In per-LED mode it's mixed from RGB. *White balance* on the strip page corrects that mix: flip between *Show mixed white* and *Show real white* and adjust until they match.
+- **Group changes glide** over about half a second. That's the strip's firmware, and it applies even with a transition of 0.
+- **Untested hardware.** Strips with more than 24 groups (over 96 LEDs at 4 per group) automatically use per-LED control.
+- **No state read-back.** govee-zones only sends commands. Changes made elsewhere aren't reflected in Home Assistant.
 
-```sh
-pnpm cli fill 255 180 100 --ip 192.168.1.50 -n 60   # hold a color until Ctrl-C
-pnpm cli pixel 12 --ip 192.168.1.50 -n 60
-pnpm cli chase --ip 192.168.1.50 -n 60
-pnpm cli enable|disable|on|off --ip 192.168.1.50
-pnpm cli --help
-```
+## Troubleshooting
 
-Open questions to check against the real strip (SPEC §9):
+- **Nothing happens.** Check that LAN Control is on in the Govee app and that the IP is right, then use *Test* on the Devices page. The error banner and the Mode sensor show send failures.
+- **The strip won't stay on from the Govee app.** That's expected while it isn't released: govee-zones keeps it the way your lights say. Turn on **Release to Govee** to use the app.
+- **Lights turn off or change on their own.** Something else is controlling the strip. Common causes:
+  - a second govee-zones instance (an old container, or a dev copy) that isn't released,
+  - another Govee integration (e.g. govee2mqtt or a cloud integration) with automations or scenes,
+  - a schedule in the Govee app.
 
-1. **Max colors per packet** — assumed 84 (single-byte length). Only matters for strips longer than 84 LEDs.
-2. **How fewer colors map onto more LEDs** — `fill`/`pixel` with `-n` smaller than the LED count.
-3. ~~**Brightness**~~ — verified: the strip's own brightness scales razer output, so the service sets it to 100 when streaming starts. As a result, scenes after *Release to Govee* run at 100%.
-4. **Does razer need `turn` on first?** — compare with `--no-turn` while the strip is off.
-5. **Power cycle mid-stream** — the service re-sends `enable` every 30 s while streaming; check whether that's needed/enough.
-6. **Keepalive** — default 2 s.
+  Run with `LOG_LEVEL=debug` to see every command govee-zones sends. If the strip changes without a matching log line, the change came from elsewhere.
+- **Two instances on one broker.** Only run one instance per `MQTT_BASE_TOPIC`: they would answer the same Home Assistant commands. Use a different base topic for testing.
+- **A zone looks slightly off its edges.** It's being rounded to groups. The strip view shows how; use *Fine* selections to line it up with the dividers, or set the strip to *Use exact LEDs* (that zone then uses per-LED control while it's on).
 
-## Behavior notes
+## Upgrading
 
-- **Whites are mixed from RGB.** Razer mode can't drive the strip's white LEDs, so whites are dimmer than Govee's own and may look tinted. Use the strip page's *White balance* panel to correct the tint: show the test white, then toggle *Release to Govee* to compare against Govee's white.
-- Never binds UDP 4002, so it coexists with govee2mqtt on the same host. Devices are configured by IP only.
-- While this service is streaming, **govee2mqtt's reported state for the strip will be wrong**, and govee2mqtt effects are overwritten within one keepalive. Use *Release to Govee* for scenes.
-- When all lights turn off, each strip follows its *When all lights are off* setting: turn the strip off (default), hold black (stay in streaming mode), or release to the Govee app.
-- On startup, lights that were on resume streaming. A strip that was idle is left alone (nothing is sent), so a restart doesn't kill a Govee scene.
-- On clean shutdown (SIGINT/SIGTERM) every streaming strip exits explicitly. If the process crashes, the strip reverts to its Govee app effect within ~60 s.
+Configs from older versions are converted automatically on startup. The original is kept beside it as `govee-zones.json.pre-groups-<time>.bak`, and the log lists every change:
+
+- On/off and RGB lights keep their type and color.
+- `dimmable` lights become RGB. `rgb_ct` lights become White (if their default was a color temperature) or RGB.
+- The "When all lights are off" setting is dropped; the strip now always turns off.
+
+Older exports are converted the same way when you import them. To use the strip's real white on a converted light, set its look to *White* in its editor.
 
 ## Development
 
+Requires Node.js 22.12+ and pnpm.
+
 ```sh
-pnpm test         # unit tests (vitest)
-pnpm typecheck    # server + web
+pnpm install
+pnpm dev:sim     # backend + UI on http://localhost:5173, logging commands instead of sending them
+pnpm dev         # the same, sending real UDP; uses ./data and writes ./data/debug.log
+pnpm test        # unit tests (Vitest)
+pnpm typecheck   # server + web
+pnpm build       # dist/web + dist/server
 ```
+
+`pnpm cli` has tools for checking hardware directly. These include a guided probe for group control (`pnpm cli probe --round 2 --ip <ip>`) and raw group commands (`pnpm cli seg white 1-2 2700 --ip <ip>`); see `pnpm cli --help`.
+
+Design notes:
+- [`SPEC.md`](SPEC.md): the original design.
+- [`docs/segment-mode-plan.md`](docs/segment-mode-plan.md): group control.
+- [`docs/segment-mode-results.md`](docs/segment-mode-results.md): the hardware findings behind it.
+- [`docs/segment-mode-testing.md`](docs/segment-mode-testing.md): test plan and probe.
+
+## License
+
+[MIT](LICENSE)

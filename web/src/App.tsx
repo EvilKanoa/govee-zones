@@ -97,6 +97,7 @@ export function App() {
             device={device}
             snapshot={live.snapshot}
             frame={live.frames[device.id]}
+            realWhite={live.realWhite[device.id]}
             run={run}
           />
         ) : (

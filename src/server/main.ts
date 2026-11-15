@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pino from 'pino';
@@ -9,16 +10,30 @@ import { Store } from './store.js';
 import { simulatedTransport, udpTransport } from './transport.js';
 
 const config = loadConfig();
+const dev = process.env.NODE_ENV !== 'production';
+// Local dev also writes everything to DATA_DIR/debug.log (fresh each start) for after-the-fact diagnosis.
+const logFile = dev ? path.join(config.dataDir, 'debug.log') : undefined;
+if (logFile) {
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.writeFileSync(logFile, '');
+}
 const log = pino({
   level: config.logLevel,
-  // Pretty logs only in local dev: pino-pretty is a devDependency and isn't in the image.
-  transport:
-    process.stdout.isTTY && process.env.NODE_ENV !== 'production'
-      ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss' } }
-      : undefined,
+  transport: {
+    targets: [
+      // Pretty logs only in local dev: pino-pretty is a devDependency and isn't in the image.
+      process.stdout.isTTY && dev
+        ? { target: 'pino-pretty', level: config.logLevel, options: { translateTime: 'HH:MM:ss' } }
+        : { target: 'pino/file', level: config.logLevel, options: { destination: 1 } },
+      ...(logFile ? [{ target: 'pino/file', level: config.logLevel, options: { destination: logFile } }] : []),
+    ],
+  },
 });
+if (logFile) log.info({ logFile }, 'writing a debug log');
 
 const store = new Store(config.dataDir);
+if (store.migrationNotes.length)
+  log.warn({ backup: store.migrationBackup, changes: store.migrationNotes }, 'converted the config from an older format (original kept as a backup)');
 const transport = config.simulate ? simulatedTransport(log.child({ module: 'sim' })) : udpTransport();
 const engine = new Engine(store, transport, log.child({ module: 'engine' }));
 
@@ -41,7 +56,7 @@ let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
-  log.info({ signal }, 'shutting down: applying idle behavior');
+  log.info({ signal }, 'shutting down (group mode leaves the lights as they are)');
   await engine.stop();
   await mqtt?.close();
   store.flush();

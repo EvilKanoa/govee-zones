@@ -1,52 +1,74 @@
-// Per-device render/stream loop: store → compositor → lifecycle → transport.
+// Per-device control loop: store → planner/compositor → lifecycle → transport.
+// Each strip is driven with group (segment) commands when it can, and with
+// per-LED razer streaming when something needs single LEDs.
+// See docs/segment-mode-plan.md §3.
 import { EventEmitter } from 'node:events';
 import type { Logger } from 'pino';
 import { miredsToRgb } from '../shared/color.js';
-import type { Device, DeviceStatus, LightCommand } from '../shared/types.js';
+import { groupCount, groupsUnavailable, roundToGroups } from '../shared/groups.js';
+import type { ControlReason, Device, DeviceStatus, LightCommand } from '../shared/types.js';
 import { applyCommand, commandTransitionMs } from './commands.js';
 import {
   animating,
   applyWhiteBalance,
   composite,
   downsample,
-  lookAt,
   startTransition,
   transitionActive,
+  visualAt,
   type RenderState,
   type Transition,
 } from './compositor.js';
-import { decide, type Action } from './lifecycle.js';
+import { encodeGroups, groupPixels, packDatagrams, type SentGroup } from './groupOutput.js';
+import { decide, type Action, type Decision, type Held, type PolicyInput } from './lifecycle.js';
+import { groupLooks, isVisible, plan, type GroupLook, type PlanResult } from './plan.js';
 import * as proto from './protocol.js';
+import { describeSegmentFrame } from './transport.js';
 import type { Store, StoreEvent } from './store.js';
 import type { Transport } from './transport.js';
 
-const FRAME_INTERVAL_MS = 33; // ~30 fps while animating
+const FRAME_INTERVAL_MS = 33; // ~30 fps per-LED while animating
+/** Group updates are at least this far apart; the firmware glides each change (< 0.5 s). */
+export const GROUP_STEP_MS = 100;
 /**
- * Periodically re-send brightness 100 + razer enable: undoes a brightness change
- * from the Govee app, and recovers if the strip power-cycled mid-stream (unverified).
+ * Re-send brightness 100 (+ razer enable in per-LED mode, + the full group state
+ * in group mode) this often: undoes Govee app changes, recovers from power cycles.
  */
-const REASSERT_MS = 30_000;
+export const REASSERT_MS = 30_000;
+const IDENTIFY_BLINK_MS = { groups: 700, per_led: 400 };
 
-/** A temporary frame source that takes over a device (identify, pixel finder, test chase). */
+/** A temporary source that takes over a device (identify, pixel finder, test chase, white test). */
 interface Override {
+  name: string;
   until: number;
   animated: boolean;
+  /** Needs single LEDs (forces per-LED). Otherwise `renderGroups` drives group mode. */
+  needsLeds: boolean;
   render(now: number): Uint8Array;
+  renderGroups?(now: number): GroupLook[];
 }
 
 interface Controller {
-  streaming: boolean;
-  error?: string;
+  held: Held;
   mode: DeviceStatus['mode'];
+  reason?: ControlReason;
+  detail?: string[];
+  error?: string;
   ip: string;
+  /** ledCount/groupSize/white balance the sent group state was built for. */
+  geometry: string;
   timer: NodeJS.Timeout | null;
   lastTick: number;
   lastAssert: number;
   override?: Override;
+  /** Group state we believe the strip holds (diffing base). Empty = unknown → full send. */
+  sentGroups: (SentGroup | undefined)[];
 }
 
+const geometryOf = (d: Device) => `${d.ledCount}:${d.groupSize}:${d.whiteBalance?.join(',') ?? ''}`;
+
 export class Engine extends EventEmitter<{
-  frame: [deviceId: string, pixels: Uint8Array];
+  frame: [deviceId: string, pixels: Uint8Array, realWhite?: boolean[]];
   status: [deviceId: string, status: DeviceStatus];
 }> {
   private ctl = new Map<string, Controller>();
@@ -63,7 +85,7 @@ export class Engine extends EventEmitter<{
     store.on('change', (e) => this.onStoreChange(e));
   }
 
-  /** Restore persisted state and apply the policy to every device (SPEC §6.5). */
+  /** Apply the policy to every device: lights that were on resume, owned strips with nothing on are turned off, released strips get nothing. */
   start() {
     for (const d of this.store.devices) this.requestTick(d.id);
   }
@@ -73,9 +95,10 @@ export class Engine extends EventEmitter<{
     const c = this.ctl.get(deviceId);
     return {
       mode: c?.mode ?? 'idle',
-      streaming: c?.streaming ?? false,
+      reason: c?.reason,
+      detail: c?.detail,
       error: c?.error,
-      sentColors: d ? Math.min(d.ledCount, d.maxColorsPerPacket) : 0,
+      groups: d && !groupsUnavailable(d) ? groupCount(d.ledCount, d.groupSize) : undefined,
     };
   }
 
@@ -92,7 +115,7 @@ export class Engine extends EventEmitter<{
     const now = this.now();
     const prev = this.renderState(lightId);
     const next = applyCommand(light, prev, cmd);
-    const t = startTransition(lookAt(prev, now), next, commandTransitionMs(light, cmd), now);
+    const t = startTransition(visualAt(prev, now), next, commandTransitionMs(light, cmd), now);
     if (t) this.transitions.set(lightId, t);
     else this.transitions.delete(lightId);
     this.store.setState(lightId, next);
@@ -102,43 +125,59 @@ export class Engine extends EventEmitter<{
     this.store.setFlags(deviceId, { released });
   }
 
-  /** Blink a light's ranges white (everything else black) so it can be found on the house. */
+  /**
+   * Blink a light so it can be found on the house: its rounded groups in group
+   * mode (no switch, and it shows the rounding), its exact LEDs otherwise.
+   */
   identify(lightId: string, durationMs = 5000) {
     const light = this.store.light(lightId);
     if (!light) throw new Error(`unknown light ${lightId}`);
     const device = this.requireDevice(light.deviceId);
     const start = this.now();
+    const byGroups = !groupsUnavailable(device);
+    const groups = new Set(byGroups ? roundToGroups(light.ranges, device.ledCount, device.groupSize) : []);
+    const blinkOn = (now: number, period: number) => Math.floor((now - start) / period) % 2 === 0;
     this.setOverride(device, {
+      name: 'identify',
       until: start + durationMs,
       animated: true,
+      needsLeds: !byGroups,
       render: (now) => {
         const out = new Uint8Array(device.ledCount * 3);
-        if (Math.floor((now - start) / 400) % 2 === 0) {
+        if (blinkOn(now, IDENTIFY_BLINK_MS.per_led)) {
           for (const [a, b] of light.ranges)
             for (let i = Math.max(0, a); i <= Math.min(b, device.ledCount - 1); i++) out.fill(255, i * 3, i * 3 + 3);
         }
         return out;
       },
+      renderGroups: (now) => {
+        const on = blinkOn(now, IDENTIFY_BLINK_MS.groups);
+        return Array.from({ length: groupCount(device.ledCount, device.groupSize) }, (_, g) =>
+          on && groups.has(g) ? { kind: 'white', kelvin: 6500, pct: 100 } : { kind: 'off' },
+        );
+      },
     });
   }
 
-  /** Light one LED white (everything else black). */
+  /** Light one LED white (everything else black). Always per-LED. */
   pixel(deviceId: string, index: number, durationMs = 10_000) {
     const device = this.requireDevice(deviceId);
     if (index < 0 || index >= device.ledCount) throw new RangeError(`LED ${index} out of range`);
     const out = new Uint8Array(device.ledCount * 3);
     out.fill(255, index * 3, index * 3 + 3);
-    this.setOverride(device, { until: this.now() + durationMs, animated: false, render: () => out });
+    this.setOverride(device, { name: 'pixel finder', until: this.now() + durationMs, animated: false, needsLeds: true, render: () => out });
   }
 
-  /** Short chase along the whole strip. */
+  /** Short chase along the whole strip. Always per-LED. */
   test(deviceId: string, durationMs = 6000) {
     const device = this.requireDevice(deviceId);
     const start = this.now();
     const width = Math.max(3, Math.round(device.ledCount / 20));
     this.setOverride(device, {
+      name: 'test chase',
       until: start + durationMs,
       animated: true,
+      needsLeds: true,
       render: (now) => {
         const out = new Uint8Array(device.ledCount * 3);
         const head = Math.floor(((now - start) / 3000) * device.ledCount) % device.ledCount;
@@ -154,13 +193,26 @@ export class Engine extends EventEmitter<{
     });
   }
 
-  /** Whole strip in one color temperature, for tuning white balance against Govee's own white. */
-  testWhite(deviceId: string, kelvin = 2700, durationMs = 120_000) {
+  /**
+   * Whole strip in one color temperature, for tuning white balance: `mixed` is
+   * the per-LED RGB approximation (what the gains correct), `real` is the strip's
+   * own white via group control (the reference).
+   */
+  testWhite(deviceId: string, kelvin = 2700, kind: 'mixed' | 'real' = 'mixed', durationMs = 120_000) {
     const device = this.requireDevice(deviceId);
+    if (kind === 'real' && groupsUnavailable(device)) throw new Error('real white needs group control on this strip');
     const rgb = miredsToRgb(1_000_000 / kelvin);
     const out = new Uint8Array(device.ledCount * 3);
     for (let i = 0; i < device.ledCount; i++) out.set(rgb, i * 3);
-    this.setOverride(device, { until: this.now() + durationMs, animated: false, render: () => out });
+    const looks: GroupLook[] = Array.from({ length: groupCount(device.ledCount, device.groupSize) }, () => ({ kind: 'white', kelvin, pct: 100 }));
+    this.setOverride(device, {
+      name: `${kind} white test`,
+      until: this.now() + durationMs,
+      animated: false,
+      needsLeds: kind === 'mixed',
+      render: () => out,
+      renderGroups: () => looks,
+    });
   }
 
   clearOverride(deviceId: string) {
@@ -193,7 +245,7 @@ export class Engine extends EventEmitter<{
   private controller(d: Device): Controller {
     let c = this.ctl.get(d.id);
     if (!c) {
-      c = { streaming: false, mode: 'idle', ip: d.ip, timer: null, lastTick: 0, lastAssert: 0 };
+      c = { held: 'none', mode: 'idle', ip: d.ip, geometry: geometryOf(d), timer: null, lastTick: 0, lastAssert: 0, sentGroups: [] };
       this.ctl.set(d.id, c);
     }
     return c;
@@ -213,10 +265,15 @@ export class Engine extends EventEmitter<{
         return;
       }
       if (c && c.ip !== d.ip) {
-        // Explicitly release the old address before streaming to the new one.
-        if (c.streaming) void this.sendActions(c.ip, ['disable'], c);
-        c.streaming = false;
+        // Explicitly release the old address before driving the new one. Groups hold by themselves.
+        if (c.held === 'per_led') void this.sendActions(c.ip, ['disable'], c);
+        c.held = 'none';
         c.ip = d.ip;
+        c.sentGroups = [];
+      }
+      if (c && c.geometry !== geometryOf(d)) {
+        c.geometry = geometryOf(d);
+        c.sentGroups = [];
       }
       this.requestTick(e.id);
       return;
@@ -227,18 +284,18 @@ export class Engine extends EventEmitter<{
 
   private retire(id: string, c: Controller) {
     if (c.timer) clearTimeout(c.timer);
-    if (c.streaming) void this.sendActions(c.ip, ['disable'], c);
+    if (c.held === 'per_led') void this.sendActions(c.ip, ['disable'], c);
     this.ctl.delete(id);
   }
 
-  /** Coalesce change bursts into one tick, no faster than the animation frame rate. */
+  /** Coalesce change bursts into one tick, no faster than the current mode's frame rate. */
   private requestTick(deviceId: string) {
     const d = this.store.device(deviceId);
     if (!d || this.stopped) return;
     const c = this.controller(d);
     if (c.timer) clearTimeout(c.timer);
-    const delay = Math.max(0, c.lastTick + FRAME_INTERVAL_MS - this.now());
-    c.timer = setTimeout(() => void this.tick(deviceId), delay);
+    const interval = c.held === 'groups' ? GROUP_STEP_MS : FRAME_INTERVAL_MS;
+    c.timer = setTimeout(() => void this.tick(deviceId), Math.max(0, c.lastTick + interval - this.now()));
   }
 
   private async tick(deviceId: string) {
@@ -250,55 +307,118 @@ export class Engine extends EventEmitter<{
     c.lastTick = now;
 
     if (c.override && now >= c.override.until) c.override = undefined;
+    const ov = c.override;
     const lights = this.store.lightsFor(d.id);
     const states: Record<string, RenderState> = {};
     for (const l of lights) {
       states[l.id] = this.renderState(l.id);
       if (this.transitions.has(l.id) && !transitionActive(this.transitions.get(l.id), now)) this.transitions.delete(l.id);
     }
-    const visible = lights.some((l) => states[l.id].on || transitionActive(states[l.id].transition, now));
-    const flags = this.store.flags(d.id);
 
-    const decision = decide({
-      enabled: d.enabled,
-      released: flags.released,
-      idleBehavior: d.idleBehavior,
-      active: visible || !!c.override,
-      streaming: c.streaming,
-    });
-
-    const actions = [...decision.actions];
-    if (decision.streaming && !actions.includes('enable') && now - c.lastAssert > REASSERT_MS) actions.push('brightness_max', 'enable');
-    if (actions.includes('enable')) c.lastAssert = now;
-    const prevMode = c.mode;
-    const prevError = c.error;
-    c.streaming = decision.streaming;
-    c.mode = decision.mode;
-
-    const full = c.override ? c.override.render(now) : composite(d, lights, states, now);
-    let ok = await this.sendActions(d.ip, actions, c);
-    if (decision.frame) {
-      const out = decision.frame === 'black' ? new Uint8Array(d.ledCount * 3) : full;
-      const corrected = applyWhiteBalance(out, d.whiteBalance);
-      ok = (await this.send(d.ip, proto.frame(downsample(corrected, d.maxColorsPerPacket)), c, 'frame')) && ok;
+    const groupsAvailable = !groupsUnavailable(d);
+    let pl: PlanResult | undefined;
+    let want: PolicyInput['want'] = 'none';
+    if (ov) want = ov.needsLeds || !groupsAvailable ? 'per_led' : 'groups';
+    else if (lights.some((l) => isVisible(states[l.id], now))) {
+      pl = plan(d, lights, states, now);
+      want = pl.control;
     }
-    if (ok && decision.actions.length + (decision.frame ? 1 : 0) > 0) c.error = undefined;
+    const fading = animating(d, lights, states, now);
+    const flags = this.store.flags(d.id);
+    const dec = decide({ enabled: d.enabled, released: flags.released, groupsAvailable, want, held: c.held, fading });
+
+    const wasHeld = c.held;
+    const before = [...dec.before];
+    const due = now - c.lastAssert > REASSERT_MS;
+    if (dec.held === 'per_led' && !before.includes('enable') && due) before.push('brightness_max', 'enable');
+    // Owned and off: keep it off (undoes a power-on from the Govee app or after a power cut).
+    if (dec.held === 'off' && !before.length && due) before.push('turn_off');
+    if (dec.held === 'off' && before.includes('turn_off')) c.lastAssert = now;
+    const after = [...dec.after];
+    if (dec.held === 'groups' && dec.frame === 'groups' && !before.includes('brightness_max') && due) {
+      // Undo Govee app changes. Ends with turn_on: if the app powered the strip off, the
+      // frames alone would light it while its power state stays off (it then goes dark at random).
+      before.push('brightness_max');
+      if (!after.includes('turn_on')) after.push('turn_on');
+    }
+    if (before.includes('brightness_max') || before.includes('enable')) c.lastAssert = now;
+    // Full group send on entry (the Govee app may have changed the strip meanwhile) and on every reassert.
+    const fullGroups = wasHeld !== 'groups' || due;
+
+    const prev = { mode: c.mode, error: c.error, reason: c.reason, detail: c.detail?.join('\n') };
+    c.held = dec.held;
+    c.mode = dec.mode;
+    [c.reason, c.detail] = this.reasonFor(d, dec, ov, pl);
+
+    let ok = await this.runActions(d, before, c);
+    let preview: Uint8Array;
+    let realWhite: boolean[] | undefined;
+    if (dec.frame === 'composite') {
+      preview = ov ? ov.render(now) : composite(d, lights, states, now);
+      const corrected = applyWhiteBalance(preview, d.whiteBalance);
+      ok = (await this.send(c.ip, proto.frame(downsample(corrected, d.maxColorsPerPacket)), c, 'frame')) && ok;
+    } else if (dec.frame === 'groups') {
+      const looks = ov?.renderGroups ? ov.renderGroups(now) : pl?.control === 'groups' ? pl.groups : groupLooks(d, lights, states, now);
+      ok = (await this.sendGroups(d, c, looks, fullGroups)) && ok;
+      preview = groupPixels(d, looks);
+      realWhite = looks.map((l) => l.kind === 'white');
+    } else {
+      // Not driving the strip (idle, released, disabled): preview what the lights would show.
+      preview = composite(d, lights, states, now);
+    }
+    ok = (await this.runActions(d, after, c)) && ok;
+    if (ok && before.length + after.length + (dec.frame ? 1 : 0) > 0) c.error = undefined;
     if (c.error) c.mode = 'error';
 
-    this.emit('frame', d.id, decision.frame === 'black' ? new Uint8Array(d.ledCount * 3) : full);
-    if (c.mode !== prevMode || c.error !== prevError) this.emit('status', d.id, this.status(d.id));
+    this.emit('frame', d.id, preview, realWhite);
+    if (c.mode !== prev.mode || c.error !== prev.error || c.reason !== prev.reason || c.detail?.join('\n') !== prev.detail) {
+      this.log.debug({ device: d.name, mode: c.mode, reason: c.reason, detail: c.detail, error: c.error }, 'mode');
+      this.emit('status', d.id, this.status(d.id));
+    }
 
     if (this.stopped) return;
-    const fast = animating(d, lights, states, now) || !!c.override?.animated;
-    const next = c.override
-      ? Math.min(fast ? FRAME_INTERVAL_MS : d.keepaliveMs, c.override.until - now)
-      : decision.streaming
-        ? fast ? FRAME_INTERVAL_MS : d.keepaliveMs
-        : fast ? FRAME_INTERVAL_MS : null;
+    const fast = fading || !!ov?.animated;
+    let next: number | null =
+      c.held === 'per_led' ? (fast ? FRAME_INTERVAL_MS : d.keepaliveMs)
+      : c.held === 'groups' || c.held === 'off' ? (fast ? GROUP_STEP_MS : Math.max(GROUP_STEP_MS, REASSERT_MS - (now - c.lastAssert) + 1))
+      : fast ? FRAME_INTERVAL_MS : null;
+    if (ov) next = Math.min(next ?? Infinity, ov.until - now);
     if (next !== null) c.timer = setTimeout(() => void this.tick(deviceId), Math.max(0, next));
   }
 
-  private async sendActions(ip: string, actions: Action[], c: Controller): Promise<boolean> {
+  private reasonFor(d: Device, dec: Decision, ov: Override | undefined, pl: PlanResult | undefined): [ControlReason | undefined, string[] | undefined] {
+    if (dec.mode === 'groups') return ['auto', undefined];
+    if (dec.mode !== 'per_led') return [undefined, undefined];
+    if (dec.fadeFinishing) return ['fade_finishing', undefined];
+    const unavailable = groupsUnavailable(d);
+    if (unavailable) return [unavailable, undefined];
+    if (ov) return ['override', [ov.name]];
+    if (pl?.control === 'per_led') return [pl.reason, pl.detail];
+    return [undefined, undefined];
+  }
+
+  private async sendGroups(d: Device, c: Controller, looks: GroupLook[], full: boolean): Promise<boolean> {
+    const { frames, sent } = encodeGroups(looks, full ? [] : c.sentGroups, d.whiteBalance);
+    c.sentGroups = sent;
+    if (frames.length) this.log.debug({ ip: c.ip, groups: frames.map(describeSegmentFrame).join(' · '), full }, 'group frames');
+    let ok = true;
+    for (const datagram of packDatagrams(frames)) ok = (await this.send(c.ip, datagram, c)) && ok;
+    if (!ok) c.sentGroups = []; // unknown: send everything next time
+    return ok;
+  }
+
+  private async runActions(d: Device, actions: Action[], c: Controller): Promise<boolean> {
+    let ok = true;
+    for (const a of actions) {
+      if (a === 'groups_dark') {
+        const dark: GroupLook[] = Array.from({ length: groupCount(d.ledCount, d.groupSize) }, () => ({ kind: 'off' }));
+        ok = (await this.sendGroups(d, c, dark, true)) && ok;
+      } else ok = (await this.sendActions(c.ip, [a], c)) && ok;
+    }
+    return ok;
+  }
+
+  private async sendActions(ip: string, actions: Exclude<Action, 'groups_dark'>[], c: Controller): Promise<boolean> {
     let ok = true;
     for (const a of actions) {
       const payload =
@@ -324,7 +444,11 @@ export class Engine extends EventEmitter<{
     }
   }
 
-  /** Clean shutdown: exit streaming explicitly on every device (SPEC §6.5). */
+  /**
+   * Clean shutdown. Group mode sends nothing: the strip keeps its lights. Per-LED
+   * exits like "all off" (darken groups, disable, turn off), so the strip
+   * isn't left in razer mode.
+   */
   async stop() {
     this.stopped = true;
     const pending: Promise<unknown>[] = [];
@@ -332,12 +456,14 @@ export class Engine extends EventEmitter<{
       const c = this.ctl.get(d.id);
       if (!c) continue;
       if (c.timer) clearTimeout(c.timer);
-      if (!c.streaming) continue;
-      // hold_black can't hold once we're gone, so it exits like `off`.
-      const behavior = d.idleBehavior === 'release' ? 'release' : 'off';
-      const { actions } = decide({ enabled: true, released: false, idleBehavior: behavior, active: false, streaming: true });
-      pending.push(this.sendActions(d.ip, actions, c));
-      c.streaming = false;
+      if (c.held !== 'per_led') continue;
+      const dec = decide({ enabled: true, released: false, groupsAvailable: !groupsUnavailable(d), want: 'none', held: 'per_led', fading: false });
+      pending.push(
+        (async () => {
+          await this.runActions(d, dec.before, c);
+        })(),
+      );
+      c.held = 'none';
     }
     await Promise.all(pending);
   }

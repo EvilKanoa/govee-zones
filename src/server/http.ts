@@ -7,9 +7,11 @@ import Fastify from 'fastify';
 import type { Logger } from 'pino';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
+import { MAX_KELVIN, MIN_KELVIN } from '../shared/color.js';
 import type { AppSnapshot, ServerMessage } from '../shared/types.js';
 import type { Engine } from './engine.js';
 import type { MqttBridge } from './mqtt.js';
+import { migrateConfig } from './migrate.js';
 import { configImport, deviceInput, devicePatch, lightCommand, lightInput, lightPatch } from './schemas.js';
 import type { Store } from './store.js';
 
@@ -87,8 +89,10 @@ export async function createServer(opts: {
     return { ok: true };
   });
   app.post<{ Params: { id: string } }>('/api/devices/:id/test-white', async (req) => {
-    const { kelvin } = z.object({ kelvin: z.number().min(2000).max(6500).optional() }).parse(req.body ?? {});
-    engine.testWhite(req.params.id, kelvin);
+    const { kelvin, kind } = z
+      .object({ kelvin: z.number().min(MIN_KELVIN).max(MAX_KELVIN).optional(), kind: z.enum(['mixed', 'real']).optional() })
+      .parse(req.body ?? {});
+    engine.testWhite(req.params.id, kelvin, kind);
     return { ok: true };
   });
   app.post<{ Params: { id: string } }>('/api/devices/:id/stop-override', async (req) => {
@@ -135,7 +139,8 @@ export async function createServer(opts: {
     return store.exportConfig();
   });
   app.post('/api/import', async (req) => {
-    const cfg = configImport.parse(req.body);
+    // Exports from before group control are converted the same way as the stored config.
+    const cfg = configImport.parse(migrateConfig((req.body ?? {}) as Record<string, unknown>).data);
     const ids = new Set(cfg.devices.map((d) => d.id));
     const orphan = cfg.lights.find((l) => !ids.has(l.deviceId));
     if (orphan) throw new Error(`light "${orphan.name}" references unknown device ${orphan.deviceId}`);
@@ -149,9 +154,12 @@ export async function createServer(opts: {
     const s = JSON.stringify(m);
     for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
   };
+  /** Last preview per device: group mode only ticks on change, so new clients need it. */
+  const lastFrame = new Map<string, ServerMessage>();
   app.get('/ws', { websocket: true }, (socket) => {
     clients.add(socket);
     socket.send(JSON.stringify({ type: 'snapshot', data: snapshot() } satisfies ServerMessage));
+    for (const m of lastFrame.values()) socket.send(JSON.stringify(m));
     socket.on('close', () => clients.delete(socket));
   });
 
@@ -169,16 +177,37 @@ export async function createServer(opts: {
   opts.mqtt?.on('status', pushSnapshot);
 
   const lastPreview = new Map<string, number>();
-  engine.on('frame', (deviceId, pixels) => {
-    const now = Date.now();
-    if (now - (lastPreview.get(deviceId) ?? 0) < PREVIEW_INTERVAL_MS) return;
-    lastPreview.set(deviceId, now);
-    broadcast({
+  const trailing = new Map<string, NodeJS.Timeout>();
+  engine.on('frame', (deviceId, pixels, realWhite) => {
+    const m: ServerMessage = {
       type: 'frame',
       deviceId,
       pixels: Buffer.from(pixels).toString('base64'),
       mode: engine.status(deviceId).mode,
-    });
+      realWhite,
+    };
+    lastFrame.set(deviceId, m);
+    const now = Date.now();
+    const wait = (lastPreview.get(deviceId) ?? 0) + PREVIEW_INTERVAL_MS - now;
+    clearTimeout(trailing.get(deviceId));
+    if (wait > 0) {
+      // Throttled: still deliver the latest frame once the interval passes (group mode may not tick again).
+      trailing.set(deviceId, setTimeout(() => {
+        lastPreview.set(deviceId, Date.now());
+        broadcast(lastFrame.get(deviceId)!);
+      }, wait));
+      return;
+    }
+    lastPreview.set(deviceId, now);
+    broadcast(m);
+  });
+  store.on('change', (e) => {
+    if (e.kind === 'device' && e.removed) lastFrame.delete(e.id);
+    if (e.kind === 'reset') {
+      for (const t of trailing.values()) clearTimeout(t);
+      trailing.clear();
+      lastFrame.clear();
+    }
   });
 
   // Built UI (production). In dev, Vite serves the UI and proxies /api and /ws here.

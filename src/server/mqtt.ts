@@ -2,6 +2,7 @@
 import { EventEmitter } from 'node:events';
 import mqtt, { type IClientOptions, type MqttClient } from 'mqtt';
 import type { Logger } from 'pino';
+import { lookRgb, MAX_KELVIN, MIN_KELVIN } from '../shared/color.js';
 import type { Device, DeviceStatus, LightCommand, LightState, VirtualLight } from '../shared/types.js';
 import type { Engine } from './engine.js';
 import { lightCommand } from './schemas.js';
@@ -17,10 +18,7 @@ export interface MqttOptions {
   baseTopic: string;
 }
 
-// Color temperature range we accept (mireds 153–500, see commands.ts), in kelvin for HA.
-const MIN_KELVIN = 2000;
-const MAX_KELVIN = 6535;
-const MODES: DeviceStatus['mode'][] = ['streaming', 'idle', 'released', 'error'];
+const MODES: DeviceStatus['mode'][] = ['groups', 'per_led', 'idle', 'released', 'error'];
 
 /** Topic layout. `node` is the discovery node_id and the unique_id prefix. */
 export function topics(discoveryPrefix: string, baseTopic: string) {
@@ -67,16 +65,12 @@ export function discoveryFor(t: Topics, d: Device, lights: VirtualLight[]): Map<
       command_topic: t.lightSet(l.id),
       state_topic: t.lightState(l.id),
       availability_topic: t.availability,
-      supported_color_modes:
-        l.capability === 'onoff' ? ['onoff']
-        : l.capability === 'dimmable' ? ['brightness']
-        : l.capability === 'rgb' ? ['rgb']
-        : ['rgb', 'color_temp'],
+      supported_color_modes: l.capability === 'onoff' ? ['onoff'] : l.capability === 'rgb' ? ['rgb'] : ['color_temp'],
       device,
       origin: ORIGIN,
     };
     if (l.capability !== 'onoff') cfg.brightness = true;
-    if (l.capability === 'rgb_ct') Object.assign(cfg, { color_temp_kelvin: true, min_kelvin: MIN_KELVIN, max_kelvin: MAX_KELVIN });
+    if (l.capability === 'ct') Object.assign(cfg, { color_temp_kelvin: true, min_kelvin: MIN_KELVIN, max_kelvin: MAX_KELVIN });
     out.set(t.discovery('light', l.id), cfg);
   }
   out.set(t.discovery('switch', `${d.id}_release`), {
@@ -113,17 +107,13 @@ export function statePayload(light: VirtualLight, s: LightState): Record<string,
     case 'onoff':
       p.color_mode = 'onoff';
       break;
-    case 'dimmable':
-      Object.assign(p, { color_mode: 'brightness', brightness: s.brightness });
+    case 'ct':
+      if (s.look.kind === 'white') Object.assign(p, { color_mode: 'color_temp', brightness: s.brightness, color_temp: invertTemp(s.look.mireds) });
       break;
-    case 'rgb_ct':
-      if (s.colorTemp) {
-        Object.assign(p, { color_mode: 'color_temp', brightness: s.brightness, color_temp: invertTemp(s.colorTemp) });
-        break;
-      }
-    // falls through: RGB color on an rgb_ct light
-    case 'rgb':
-      Object.assign(p, { color_mode: 'rgb', brightness: s.brightness, color: { r: s.color[0], g: s.color[1], b: s.color[2] } });
+    case 'rgb': {
+      const [r, g, b] = lookRgb(s.look);
+      Object.assign(p, { color_mode: 'rgb', brightness: s.brightness, color: { r, g, b } });
+    }
   }
   return p;
 }
@@ -301,7 +291,7 @@ export class MqttBridge extends EventEmitter<{ status: [MqttStatus] }> {
 
   private publishStatus(deviceId: string, s: DeviceStatus) {
     if (this.status !== 'connected' || !this.store.device(deviceId)) return;
-    this.pub(this.t.deviceStatus(deviceId), JSON.stringify({ mode: s.mode, error: s.error ?? null, sent_colors: s.sentColors }));
+    this.pub(this.t.deviceStatus(deviceId), JSON.stringify({ mode: s.mode, reason: s.reason ?? null, detail: s.detail ?? null, error: s.error ?? null, groups: s.groups ?? null }));
   }
 
   private pub(topic: string, payload: string) {

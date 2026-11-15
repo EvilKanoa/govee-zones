@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type {
   ConfigSnapshot,
   Device,
@@ -12,7 +12,8 @@ import type {
   VirtualLight,
 } from '../shared/types.js';
 import { defaultState } from './commands.js';
-import type { configImport, deviceInput, devicePatch, lightInput, lightPatch } from './schemas.js';
+import { migrateConfig } from './migrate.js';
+import { checkLight, configImport, lightState, type deviceInput, type devicePatch, type lightInput, type lightPatch } from './schemas.js';
 
 interface FileShape extends ConfigSnapshot {
   states: Record<string, LightState>;
@@ -33,6 +34,10 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
   private data: FileShape;
   private file: string | null;
   private saveTimer: NodeJS.Timeout | null = null;
+  /** What loading converted from an older config format (empty if nothing). The original is kept as a backup. */
+  readonly migrationNotes: string[] = [];
+  /** Where the pre-migration file was copied to, if a migration happened. */
+  readonly migrationBackup?: string;
 
   /** `dataDir` null keeps everything in memory (tests). */
   constructor(dataDir: string | null) {
@@ -40,7 +45,25 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
     this.file = dataDir ? path.join(dataDir, 'govee-zones.json') : null;
     this.data = { version: 1, devices: [], lights: [], states: {}, flags: {}, nextOrder: 0 };
     if (this.file && fs.existsSync(this.file)) {
-      this.data = { ...this.data, ...JSON.parse(fs.readFileSync(this.file, 'utf8')) };
+      const original = fs.readFileSync(this.file, 'utf8');
+      const { data: raw, notes } = migrateConfig(JSON.parse(original));
+      if (notes.length) {
+        this.migrationNotes = notes;
+        this.migrationBackup = `${this.file}.pre-groups-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
+        fs.writeFileSync(this.migrationBackup, original);
+      }
+      const parsed = configImport.safeParse({ version: 1, devices: raw.devices ?? [], lights: raw.lights ?? [] });
+      if (!parsed.success) throw new Error(`invalid config in ${this.file}; fix it by hand:\n${z.prettifyError(parsed.error)}`);
+      for (const l of parsed.data.lights) checkLight(l);
+      // Runtime states in an old shape are just reset to the light's defaults.
+      const states = Object.fromEntries(
+        Object.entries((raw.states ?? {}) as Record<string, unknown>).flatMap(([id, s]) => {
+          const r = lightState.safeParse(s);
+          return r.success ? [[id, r.data]] : [];
+        }),
+      );
+      this.data = { ...this.data, ...raw, devices: parsed.data.devices, lights: parsed.data.lights, states };
+      if (notes.length) this.flush(); // store the converted config right away
     }
   }
 
@@ -63,7 +86,7 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
   }
   state(lightId: string): LightState {
     const light = this.light(lightId);
-    return this.data.states[lightId] ?? (light ? defaultState(light) : { on: false, brightness: 255, color: [255, 255, 255] });
+    return this.data.states[lightId] ?? (light ? defaultState(light) : { on: false, brightness: 255, look: { kind: 'white', mireds: 370 } });
   }
   get states(): Record<string, LightState> {
     return Object.fromEntries(this.data.lights.map((l) => [l.id, this.state(l.id)]));
@@ -105,6 +128,7 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
   }
 
   addLight(input: z.infer<typeof lightInput>): VirtualLight {
+    checkLight(input);
     const light: VirtualLight = { id: newId(), ...input, order: this.data.nextOrder++ };
     this.data.lights.push(light);
     this.data.states[light.id] = defaultState(light);
@@ -115,7 +139,11 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
   updateLight(id: string, patch: z.infer<typeof lightPatch>): VirtualLight | undefined {
     const l = this.light(id);
     if (!l) return;
-    Object.assign(l, stripUndefined(patch));
+    const next = { ...l, ...stripUndefined(patch) };
+    checkLight(next);
+    // A capability change can make the stored state's look invalid: start from the new defaults.
+    if (next.capability !== l.capability) this.data.states[id] = { ...defaultState(next), on: this.state(id).on };
+    Object.assign(l, next);
     this.changed({ kind: 'light', id, deviceId: l.deviceId });
     return l;
   }
@@ -152,6 +180,7 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
 
   /** Replace all devices and lights. States for surviving light ids are kept. */
   importConfig(cfg: z.infer<typeof configImport>) {
+    for (const l of cfg.lights) checkLight(l);
     const ids = new Set(cfg.lights.map((l) => l.id));
     this.data.devices = cfg.devices;
     this.data.lights = cfg.lights;

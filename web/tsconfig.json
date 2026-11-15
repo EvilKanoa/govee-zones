@@ -5,5 +5,5 @@
     "moduleResolution": "Bundler",
     "types": ["vite/client"]
   },
-  "include": ["src", "../src/shared"]
+  "include": ["src", "test", "../src/shared"]
 }

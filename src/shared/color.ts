@@ -1,4 +1,4 @@
-import type { RGB } from './types.js';
+import type { Look, RGB } from './types.js';
 
 export const BLACK: RGB = [0, 0, 0];
 
@@ -44,4 +44,18 @@ export function hexToRgb(hex: string): RGB {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
   if (!m) return [0, 0, 0];
   return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
+}
+
+/** White range the strip honors (probe round 2): 2700-6500 K. */
+export const MIN_KELVIN = 2700;
+export const MAX_KELVIN = 6500;
+export const MIN_MIREDS = 154; // 6500 K
+export const MAX_MIREDS = 370; // 2700 K
+
+export const clampMireds = (m: number) => Math.max(MIN_MIREDS, Math.min(MAX_MIREDS, Math.round(m)));
+export const miredsToKelvin = (m: number) => Math.round(1_000_000 / m);
+
+/** RGB form of a look (white approximated with the blackbody fit), before brightness. */
+export function lookRgb(look: Look): RGB {
+  return look.kind === 'rgb' ? look.color : miredsToRgb(look.mireds);
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AppSnapshot, Device, DeviceStatus, VirtualLight } from '../../src/shared/types';
 import { api } from './api';
 import type { Run } from './App';
+import { boundarySet, groupsUsable, hasGroups, MODE_LABEL, modeExplanation, markGlyph, ownersChanged, ownersTitle, roundedCoverage, roundingActive, roundingMarks, snapSelection, type RoundingMark } from './control';
 import { HouseView } from './HouseView';
 import { LightsList } from './LightsList';
 import { WhiteBalance } from './WhiteBalance';
@@ -10,8 +11,8 @@ import { rangesToSet, setToRanges, tagColor } from './ranges';
 export function ModeBadge({ status }: { status?: DeviceStatus }) {
   const mode = status?.mode ?? 'idle';
   return (
-    <span className={`badge mode-${mode}`} title={status?.error}>
-      {mode}
+    <span className={`badge mode-${mode}`} title={modeExplanation(status)}>
+      {MODE_LABEL[mode]}
     </span>
   );
 }
@@ -24,8 +25,21 @@ export type Tool = 'select' | 'finder' | 'outline';
 
 export interface ViewProps {
   device: Device;
+  /** Per LED, the lights to draw as owners: as set, or rounded when "Rounded" is chosen. */
   coverage: Coverage;
+  /** Per LED, the lights as set (for tooltips). */
+  exact: Coverage;
+  /** Per LED, the lights after rounding to groups; set only when rounding applies. */
+  rounded?: Coverage;
+  /** Per LED: how rounding changes it (an arrow toward where the gaining light grows, or ✕ if it goes dark). */
+  marks?: (RoundingMark | undefined)[];
   frame?: Uint8Array;
+  /** LED indices where a new group starts: drawn as dividers in both views. */
+  boundaries: Set<number>;
+  /** Dividers are bold in group mode and dimmed otherwise. */
+  groupsActive: boolean;
+  /** Per LED: shows the strip's real white (group mode). */
+  realWhiteLeds?: boolean[];
   selection: Set<number>;
   tool: Tool;
   /** Commit a gesture's LEDs to the selection. */
@@ -38,12 +52,13 @@ interface Props {
   device: Device;
   snapshot: AppSnapshot;
   frame?: Uint8Array;
+  realWhite?: boolean[];
   run: Run;
 }
 
 const VIEW_KEY = 'govee-zones:view';
 
-export function StripPage({ device, snapshot, frame, run }: Props) {
+export function StripPage({ device, snapshot, frame, realWhite, run }: Props) {
   const lights = useMemo(
     () => snapshot.lights.filter((l) => l.deviceId === device.id),
     [snapshot.lights, device.id],
@@ -61,6 +76,17 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
   const [selection, setSelection] = useState<Set<number>>(new Set());
   const [tool, setTool] = useState<Tool>('select');
   const [additive, setAdditive] = useState(false);
+  const [fine, setFine] = useState(false);
+  const boundaries = useMemo(() => boundarySet(device), [device.ledCount, device.groupSize]);
+  const snapping = hasGroups(device) && !fine;
+  const realWhiteLeds = useMemo(
+    // Marked on the first LED of each real-white group.
+    () =>
+      realWhite && status?.mode === 'groups'
+        ? Array.from({ length: device.ledCount }, (_, i) => i % device.groupSize === 0 && !!realWhite[i / device.groupSize])
+        : undefined,
+    [realWhite, status?.mode, device.ledCount, device.groupSize],
+  );
   const [target, setTarget] = useState<string>('');
 
   const coverage = useMemo(() => {
@@ -70,6 +96,13 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
     return byLed;
   }, [lights, device.ledCount]);
   const overlapCount = coverage.filter((c) => c.length > 1).length;
+  const rounded = useMemo(
+    () => (roundingActive(device) ? roundedCoverage(coverage, lights, device) : undefined),
+    [coverage, lights, device.ledCount, device.groupSize, device.control, device.partialGroups],
+  );
+  const marks = useMemo(() => (rounded ? roundingMarks(coverage, rounded) : undefined), [coverage, rounded]);
+  const changedCount = rounded ? coverage.filter((c, i) => ownersChanged(c, rounded[i])).length : 0;
+  const [shown, setShown] = useState<'set' | 'rounded'>('set');
 
   useEffect(() => {
     if (!lights.some((l) => l.id === target)) setTarget(lights[0]?.id ?? '');
@@ -90,8 +123,9 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
     setTool(t);
   };
 
-  const onSelect = (leds: Set<number>) =>
+  const onSelect = (picked: Set<number>) =>
     setSelection((sel) => {
+      const leds = snapping ? snapSelection(picked, device) : picked;
       if (!additive) return leds;
       const next = new Set(sel);
       for (const i of leds) next.add(i);
@@ -124,8 +158,14 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
 
   const viewProps: ViewProps = {
     device,
-    coverage,
+    coverage: shown === 'rounded' && rounded ? rounded : coverage,
+    exact: coverage,
+    rounded,
+    marks,
     frame,
+    boundaries,
+    groupsActive: status?.mode === 'groups',
+    realWhiteLeds,
     selection,
     tool,
     onSelect,
@@ -141,7 +181,7 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
           {device.name} <ModeBadge status={status} />
         </h2>
         <div className="row">
-          <label className="check" title="Stop streaming and hand the strip back to the Govee app (holiday scenes)">
+          <label className="check" title="Stop driving the strip so the Govee app can use it (scenes). Light changes are still saved.">
             <input type="checkbox" checked={released} onChange={(e) => run(() => api.release(device.id, e.target.checked))} />
             Release to Govee
           </label>
@@ -155,9 +195,14 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
       {!device.enabled && <div className="notice">This device is disabled; nothing is sent to it.</div>}
       {released && (
         <div className="notice">
-          Released to Govee: the strip is not being streamed. Light changes are still saved and apply when you hold it again.
+          Released to Govee: govee-zones isn't driving the strip.{' '}
+          {groupsUsable(device)
+            ? 'The lights stay as they are until you change them in the Govee app.'
+            : 'The strip goes back to its Govee scene.'}{' '}
+          Light changes are still saved and apply when you take it back.
         </div>
       )}
+      {status?.mode === 'per_led' && <p className="muted small mode-why">Per-LED: {modeExplanation(status)}</p>}
       {device.ledCount > device.maxColorsPerPacket && (
         <div className="notice">
           Reduced resolution: {device.ledCount} LEDs are sent as {device.maxColorsPerPacket} colors per frame, so edges
@@ -198,16 +243,43 @@ export function StripPage({ device, snapshot, frame, run }: Props) {
             Add to selection
           </label>
         )}
+        {tool === 'select' && hasGroups(device) && (
+          <label className="check" title={`Selections snap to whole groups of ${device.groupSize} LEDs unless this is on`}>
+            <input type="checkbox" checked={fine} onChange={(e) => setFine(e.target.checked)} />
+            Fine (single LEDs)
+          </label>
+        )}
       </div>
       {tool !== 'outline' && (
         <p className="muted small hint">
-          {tool === 'finder' ? 'Tap an LED to light just that one on the strip.' : 'Drag across LEDs to select them.'}
+          {tool === 'finder'
+            ? 'Tap an LED to light just that one on the strip (switches to Per-LED while it runs).'
+            : snapping
+              ? `Drag across LEDs to select them; selections snap to groups of ${device.groupSize}.`
+              : 'Drag across LEDs to select them.'}
           {tool === 'select' && overlapCount > 0 &&
             ` ${overlapCount} LED${overlapCount > 1 ? 's are' : ' is'} covered by more than one light (striped).`}
         </p>
       )}
 
       {view === 'strip' ? <StripView {...viewProps} /> : <HouseView {...viewProps} />}
+      {changedCount > 0 && tool !== 'outline' && (
+        <div className="rounding-bar">
+          <span className="legend-swatch" />
+          <span className="muted small">
+            Rounding to groups of {device.groupSize} changes {changedCount} LED{changedCount > 1 ? 's' : ''}. Arrows point the
+            way a light's edge moves, in the color of the light that gains the LED; ✕ means the LED goes dark. Compare:
+          </span>
+          <div className="segmented small">
+            <button className={shown === 'set' ? 'on' : ''} onClick={() => setShown('set')} title="Light colors show each light's LEDs as you set them">
+              As set
+            </button>
+            <button className={shown === 'rounded' ? 'on' : ''} onClick={() => setShown('rounded')} title="Light colors show what group control lights">
+              Rounded
+            </button>
+          </div>
+        </div>
+      )}
 
       {selection.size > 0 && tool === 'select' && (
         <div className="selection-bar">
@@ -257,7 +329,7 @@ export function tagFill(covering: VirtualLight[]): string {
 export const livePx = (frame: Uint8Array | undefined, i: number) =>
   frame ? `rgb(${frame[i * 3]}, ${frame[i * 3 + 1]}, ${frame[i * 3 + 2]})` : '#000';
 
-function StripView({ device, coverage, frame, selection, tool, onSelect, onPixel }: ViewProps) {
+function StripView({ coverage, exact, rounded, marks, frame, boundaries, groupsActive, realWhiteLeds, selection, tool, onSelect, onPixel }: ViewProps) {
   const [drag, setDrag] = useState<{ anchor: number; current: number } | null>(null);
 
   const span = (d: { anchor: number; current: number }) => {
@@ -274,7 +346,7 @@ function StripView({ device, coverage, frame, selection, tool, onSelect, onPixel
 
   return (
     <div
-      className="strip"
+      className={`strip${boundaries.size ? ' has-groups' : ''}${groupsActive ? ' groups-active' : ''}`}
       onPointerDown={(e) => {
         const i = cellAt(e.clientX, e.clientY);
         if (i === null) return;
@@ -297,14 +369,31 @@ function StripView({ device, coverage, frame, selection, tool, onSelect, onPixel
     >
       {coverage.map((covering, i) => {
         const selected = selection.has(i) || (!!drag && span(drag).has(i));
+        let group = 0;
+        for (const b of boundaries) if (b <= i) group++;
+        const cls = [
+          'cell',
+          marks?.[i] && 'changed',
+          selected && 'selected',
+          covering.length > 1 && 'overlap',
+          tool === 'finder' && 'finder',
+          boundaries.has(i) && 'group-start',
+          boundaries.size > 0 && group % 2 === 1 && 'band',
+          realWhiteLeds?.[i] && 'real-white',
+        ].filter(Boolean).join(' ');
         return (
           <div
             key={i}
             data-led={i}
-            className={`cell${selected ? ' selected' : ''}${covering.length > 1 ? ' overlap' : ''}${tool === 'finder' ? ' finder' : ''}`}
-            title={`LED ${i}${covering.length ? ' · ' + covering.map((l) => l.name).join(' < ') : ''}`}
+            className={cls}
+            title={`LED ${i}${boundaries.size ? ` · group ${group + 1}` : ''}${ownersTitle(exact[i], rounded?.[i])}`}
           >
             <div className="cell-live" style={{ background: livePx(frame, i) }} />
+            {marks?.[i] && (
+              <span className="round-mark" style={{ color: tagColor(marks[i]!.light) }}>
+                {markGlyph(marks[i]!)}
+              </span>
+            )}
             <div className="cell-tag" style={{ background: tagFill(covering) }} />
             {i % 10 === 0 && <span className="cell-index">{i}</span>}
           </div>

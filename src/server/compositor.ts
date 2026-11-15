@@ -1,20 +1,22 @@
-// Pure rendering: (device, lights, states, now) → frame. See SPEC.md §7.
-import { lerp, scale } from '../shared/color.js';
-import type { Device, LightState, RGB, VirtualLight } from '../shared/types.js';
+// Pure rendering: light states → what each light looks like at `now`, and the
+// per-LED frame (razer). The group planner (plan.ts) uses the same visuals.
+import { lerp, lookRgb, scale } from '../shared/color.js';
+import type { Device, LightState, Look, RGB, VirtualLight } from '../shared/types.js';
 
 /**
- * What a light looks like on the strip: a color painted with some opacity over
+ * A light as drawn: its look and brightness, painted with some opacity over
  * whatever is beneath it. Fading opacity (rather than fading to black) lets a
  * high-priority light dissolve to reveal lower-priority lights underneath.
  */
-export interface Look {
-  color: RGB;
+export interface Visual {
+  look: Look;
+  brightness: number; // 0-255
   alpha: number; // 0-1
 }
 
 export interface Transition {
-  from: Look;
-  to: Look;
+  from: Visual;
+  to: Visual;
   startedAt: number;
   durationMs: number;
 }
@@ -23,31 +25,58 @@ export interface RenderState extends LightState {
   transition?: Transition;
 }
 
-/** The steady-state look implied by a light's persisted state. */
-export function targetLook(s: LightState): Look {
-  return { color: scale(s.color, s.brightness), alpha: s.on ? 1 : 0 };
+/** The steady-state visual implied by a light's persisted state. */
+export function targetVisual(s: LightState): Visual {
+  return { look: s.look, brightness: s.brightness, alpha: s.on ? 1 : 0 };
 }
 
 export function transitionActive(t: Transition | undefined, now: number): t is Transition {
   return !!t && now < t.startedAt + t.durationMs;
 }
 
-export function lookAt(s: RenderState, now: number): Look {
+function progress(t: Transition, now: number) {
+  return Math.max(0, Math.min(1, (now - t.startedAt) / t.durationMs));
+}
+
+/** Blend two looks: RGB lerps in RGB, white in mireds; RGB ↔ white swaps at the midpoint. */
+export function lerpLook(a: Look, b: Look, p: number): Look {
+  if (a.kind === 'rgb' && b.kind === 'rgb') return { kind: 'rgb', color: lerp(a.color, b.color, p) };
+  if (a.kind === 'white' && b.kind === 'white') return { kind: 'white', mireds: a.mireds + (b.mireds - a.mireds) * p };
+  return p < 0.5 ? a : b;
+}
+
+/** The visual at `now`, for group control (looks stay looks: white stays white). */
+export function visualAt(s: RenderState, now: number): Visual {
   const t = s.transition;
-  if (!transitionActive(t, now)) return targetLook(s);
-  const p = Math.max(0, (now - t.startedAt) / t.durationMs);
-  return { color: lerp(t.from.color, t.to.color, p), alpha: t.from.alpha + (t.to.alpha - t.from.alpha) * p };
+  if (!transitionActive(t, now)) return targetVisual(s);
+  const p = progress(t, now);
+  return {
+    look: lerpLook(t.from.look, t.to.look, p),
+    brightness: t.from.brightness + (t.to.brightness - t.from.brightness) * p,
+    alpha: t.from.alpha + (t.to.alpha - t.from.alpha) * p,
+  };
+}
+
+/** A visual's color with brightness applied. */
+export const visualRgb = (v: Visual): RGB => scale(lookRgb(v.look), v.brightness);
+
+/** Color + opacity at `now`, for per-LED rendering: RGB always lerps smoothly. */
+export function paintAt(s: RenderState, now: number): { color: RGB; alpha: number } {
+  const t = s.transition;
+  if (!transitionActive(t, now)) return { color: visualRgb(targetVisual(s)), alpha: s.on ? 1 : 0 };
+  const p = progress(t, now);
+  return { color: lerp(visualRgb(t.from), visualRgb(t.to), p), alpha: t.from.alpha + (t.to.alpha - t.from.alpha) * p };
 }
 
 /**
  * Build the transition from whatever is visible now to a new state. When the
- * light starts invisible, it fades in at its new color rather than sweeping hue.
+ * light starts invisible, it fades in at its new look rather than sweeping hue.
  */
-export function startTransition(current: Look, next: LightState, durationMs: number, now: number): Transition | undefined {
+export function startTransition(current: Visual, next: LightState, durationMs: number, now: number): Transition | undefined {
   if (durationMs <= 0) return undefined;
-  const to = targetLook(next);
-  const from = current.alpha === 0 ? { color: to.color, alpha: 0 } : current;
-  if (to.alpha === 0) to.color = from.color; // fade out holding the current color
+  let to = targetVisual(next);
+  const from = current.alpha === 0 ? { ...to, alpha: 0 } : current;
+  if (to.alpha === 0) to = { ...from, alpha: 0 }; // fade out holding the current look
   return { from, to, startedAt: now, durationMs };
 }
 
@@ -56,7 +85,7 @@ export function paintOrder(lights: VirtualLight[]): VirtualLight[] {
   return [...lights].sort((a, b) => a.priority - b.priority || a.order - b.order);
 }
 
-/** Full-resolution frame: `ledCount` pixels, packed RGB. */
+/** Full-resolution per-LED frame: `ledCount` pixels, packed RGB. */
 export function composite(
   device: Device,
   lights: VirtualLight[],
@@ -67,23 +96,17 @@ export function composite(
   for (const light of paintOrder(lights.filter((l) => l.deviceId === device.id))) {
     const s = states[light.id];
     if (!s) continue;
-    const { color, alpha } = lookAt(s, now);
+    const { color, alpha } = paintAt(s, now);
     if (alpha <= 0) continue;
     for (const [a, b] of light.ranges) {
       const lo = Math.max(0, Math.min(a, b));
       const hi = Math.min(device.ledCount - 1, Math.max(a, b));
       for (let i = lo; i <= hi; i++) {
         const o = i * 3;
-        if (alpha >= 1) {
-          out[o] = color[0];
-          out[o + 1] = color[1];
-          out[o + 2] = color[2];
-        } else {
-          const px = lerp([out[o], out[o + 1], out[o + 2]], color, alpha);
-          out[o] = px[0];
-          out[o + 1] = px[1];
-          out[o + 2] = px[2];
-        }
+        const px = alpha >= 1 ? color : lerp([out[o], out[o + 1], out[o + 2]], color, alpha);
+        out[o] = px[0];
+        out[o + 1] = px[1];
+        out[o + 2] = px[2];
       }
     }
   }

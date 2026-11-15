@@ -19,7 +19,7 @@ export const api = {
   test: (id: string) => req('POST', `/api/devices/${id}/test`),
   pixel: (id: string, index: number) => req('POST', `/api/devices/${id}/pixel`, { index }),
   stopOverride: (id: string) => req('POST', `/api/devices/${id}/stop-override`),
-  testWhite: (id: string, kelvin?: number) => req('POST', `/api/devices/${id}/test-white`, { kelvin }),
+  testWhite: (id: string, kelvin: number, kind: 'mixed' | 'real') => req('POST', `/api/devices/${id}/test-white`, { kelvin, kind }),
   release: (id: string, released: boolean) => req('POST', `/api/devices/${id}/release`, { released }),
   reorder: (id: string, order: string[]) => req('PUT', `/api/devices/${id}/priorities`, { order }),
   addLight: (l: Partial<VirtualLight>) => req<VirtualLight>('POST', '/api/lights', l),
@@ -40,6 +40,8 @@ export const api = {
 export interface Live {
   snapshot: AppSnapshot | null;
   frames: Record<string, Uint8Array>;
+  /** Per device, in group mode: which groups show the strip's real white. */
+  realWhite: Record<string, boolean[] | undefined>;
   connected: boolean;
 }
 
@@ -47,6 +49,7 @@ export interface Live {
 export function useLive(): Live {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [frames, setFrames] = useState<Record<string, Uint8Array>>({});
+  const [realWhite, setRealWhite] = useState<Record<string, boolean[] | undefined>>({});
   const [connected, setConnected] = useState(false);
   const retry = useRef<number>(0);
 
@@ -68,6 +71,7 @@ export function useLive(): Live {
           const px = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) px[i] = bin.charCodeAt(i);
           setFrames((f) => ({ ...f, [m.deviceId]: px }));
+          setRealWhite((r) => (String(r[m.deviceId]) === String(m.realWhite) ? r : { ...r, [m.deviceId]: m.realWhite }));
         }
       };
     };
@@ -79,5 +83,5 @@ export function useLive(): Live {
     };
   }, []);
 
-  return { snapshot, frames, connected };
+  return { snapshot, frames, realWhite, connected };
 }

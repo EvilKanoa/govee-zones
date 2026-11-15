@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUT_WIDTH, ledPositions, type Layout, type LayoutPoint } from '../../src/shared/layout';
 import { api } from './api';
 import { ConfirmDelete } from './DevicesPage';
+import { markGlyph, ownersTitle, type RoundingMark } from './control';
 import { tagColor } from './ranges';
 import { livePx, type ViewProps } from './StripPage';
 
@@ -30,7 +31,7 @@ async function prepPhoto(file: File): Promise<{ blob: Blob; aspect: number }> {
   return { blob, aspect: bmp.height / bmp.width };
 }
 
-export function HouseView({ device, coverage, frame, selection, tool, onSelect, onPixel, run }: ViewProps) {
+export function HouseView({ device, coverage, exact, rounded, marks, frame, boundaries, groupsActive, selection, tool, onSelect, onPixel, run }: ViewProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [layout, setLayout] = useState<Layout>(device.layout ?? emptyLayout);
@@ -66,6 +67,24 @@ export function HouseView({ device, coverage, frame, selection, tool, onSelect, 
   }, [layout.points]);
   const ledR = Math.max(Math.min((pathLength / Math.max(1, placed)) * 0.42, 14), 3.5 * unitsPerPx);
   const hitR = Math.max(ledR * 1.4, 14 * unitsPerPx);
+
+  /** Group dividers: a short tick across the path between the last LED of a group and the first of the next. */
+  const dividers = useMemo(() => {
+    const half = ledR * 1.7 + 3 * unitsPerPx;
+    const out: { b: number; x1: number; y1: number; x2: number; y2: number }[] = [];
+    for (const b of boundaries) {
+      const p0 = positions[b - 1];
+      const p1 = positions[b];
+      if (!p0 || !p1) continue;
+      const len = Math.hypot(p1.x - p0.x, p1.y - p0.y) || 1;
+      const nx = -(p1.y - p0.y) / len;
+      const ny = (p1.x - p0.x) / len;
+      const mx = (p0.x + p1.x) / 2;
+      const my = (p0.y + p1.y) / 2;
+      out.push({ b, x1: mx - nx * half, y1: my - ny * half, x2: mx + nx * half, y2: my + ny * half });
+    }
+    return out;
+  }, [boundaries, positions, ledR, unitsPerPx]);
 
   const save = (next: Layout) => {
     setLayout(next);
@@ -206,6 +225,17 @@ export function HouseView({ device, coverage, frame, selection, tool, onSelect, 
           strokeWidth={(tool === 'outline' ? 2 : 1) * unitsPerPx}
         />
 
+        {tool !== 'outline' && dividers.length > 0 && (
+          <g className={`group-dividers${groupsActive ? ' active' : ''}`}>
+            {dividers.map((t) => (
+              <g key={t.b}>
+                <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} className="divider-halo" strokeWidth={4 * unitsPerPx} />
+                <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} className="divider" strokeWidth={1.75 * unitsPerPx} />
+              </g>
+            ))}
+          </g>
+        )}
+
         {positions.map((q, i) => {
           if (!q) return null;
           const covering = coverage[i];
@@ -213,6 +243,7 @@ export function HouseView({ device, coverage, frame, selection, tool, onSelect, 
           const selected = selection.has(i) || brush?.has(i);
           return (
             <g key={i}>
+              {marks?.[i] && <circle cx={q.x} cy={q.y} r={ledR * 1.55 + 3 * unitsPerPx} className="rounding-halo" strokeWidth={1.5 * unitsPerPx} />}
               {selected && <circle cx={q.x} cy={q.y} r={ledR + 2.5 * unitsPerPx} className="led-selected" strokeWidth={2 * unitsPerPx} />}
               <circle
                 cx={q.x}
@@ -223,7 +254,7 @@ export function HouseView({ device, coverage, frame, selection, tool, onSelect, 
                 strokeWidth={Math.max(1.5 * unitsPerPx, ledR * 0.35)}
                 strokeDasharray={covering.length > 1 ? `${ledR * 0.6} ${ledR * 0.4}` : undefined}
               >
-                <title>{`LED ${i}${covering.length ? ' · ' + covering.map((l) => l.name).join(' < ') : ''}`}</title>
+                <title>{`LED ${i}${ownersTitle(exact[i], rounded?.[i])}`}</title>
               </circle>
               {i % 10 === 0 && (
                 <text x={q.x} y={q.y - ledR - 4 * unitsPerPx} className="led-index" fontSize={10 * unitsPerPx}>
@@ -233,6 +264,10 @@ export function HouseView({ device, coverage, frame, selection, tool, onSelect, 
             </g>
           );
         })}
+
+        {tool !== 'outline' &&
+          marks &&
+          positions.map((q, i) => (q && marks[i] ? <MarkArrow key={`m${i}`} m={marks[i]!} at={q} prev={positions[i - 1]} next={positions[i + 1]} size={ledR * 1.15 + 1.5 * unitsPerPx} unit={unitsPerPx} /> : null))}
 
         {tool === 'outline' &&
           layout.points.map((q, i) => (
@@ -346,4 +381,34 @@ function nearestTo(positions: (Pt | null)[], p: Pt): number | null {
     if (d < bestD) [best, bestD] = [i, d];
   });
   return best;
+}
+
+/** Rounding marker on an LED: a triangle along the outline toward where the gaining light grows, or ✕ if it goes dark. */
+function MarkArrow({ m, at, prev, next, size, unit }: { m: RoundingMark; at: Pt; prev: Pt | null | undefined; next: Pt | null | undefined; size: number; unit: number }) {
+  const color = tagColor(m.light);
+  if (m.kind === 'dark' || m.dir === 0) {
+    return (
+      <text x={at.x} y={at.y} className="round-mark-svg" fontSize={size * 1.6} fill={color} strokeWidth={3 * unit} dominantBaseline="central">
+        {markGlyph(m)}
+      </text>
+    );
+  }
+  // Direction of increasing LED index along the path at this LED.
+  const a = prev ?? at;
+  const b = next ?? at;
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const tx = ((b.x - a.x) / len) * m.dir;
+  const ty = ((b.y - a.y) / len) * m.dir;
+  const nx = -ty;
+  const ny = tx;
+  // Notched arrowhead (tip, back corners, notch): reads one way even at an angle.
+  const p = (along: number, across: number) => `${at.x + (tx * along + nx * across) * size},${at.y + (ty * along + ny * across) * size}`;
+  return (
+    <polygon
+      points={[p(1.15, 0), p(-0.75, 0.8), p(-0.3, 0), p(-0.75, -0.8)].join(' ')}
+      fill={color}
+      className="round-mark-arrow"
+      strokeWidth={1.5 * unit}
+    />
+  );
 }

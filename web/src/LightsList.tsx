@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { hexToRgb, miredsToRgb, rgbToHex } from '../../src/shared/color';
-import type { AppSnapshot, Capability, Device, LightCommand, LightState, VirtualLight } from '../../src/shared/types';
+import { hexToRgb, lookRgb, MAX_MIREDS, miredsToKelvin, MIN_MIREDS, rgbToHex } from '../../src/shared/color';
+import type { AppSnapshot, Capability, Device, DeviceStatus, LightCommand, LightState, Look, VirtualLight } from '../../src/shared/types';
 import { api } from './api';
 import type { Run } from './App';
+import { coverageLabel, modeExplanation } from './control';
 import { ConfirmDelete } from './DevicesPage';
 import { formatRanges, parseRanges, tagColor } from './ranges';
 
 const capLabel: Record<Capability, string> = {
   onoff: 'On/off',
-  dimmable: 'Dimmable',
   rgb: 'RGB',
-  rgb_ct: 'RGB + color temp',
+  ct: 'White',
 };
 
 interface Props {
@@ -71,6 +71,8 @@ export function LightsList({ device, lights, snapshot, released, run }: Props) {
         >
           <LightRow
             light={l}
+            device={device}
+            status={snapshot.status[device.id]}
             state={snapshot.states[l.id]}
             released={released}
             run={run}
@@ -110,12 +112,16 @@ export function LightsList({ device, lights, snapshot, released, run }: Props) {
 
 function LightRow({
   light,
+  device,
+  status,
   state,
   released,
   run,
   dragHandle,
 }: {
   light: VirtualLight;
+  device: Device;
+  status?: DeviceStatus;
   state?: LightState;
   released: boolean;
   run: Run;
@@ -125,6 +131,10 @@ function LightRow({
   const send = useDebouncedCommand(light.id, run);
   const cap = light.capability;
   const on = state?.on ?? false;
+  const look = state?.look ?? light.defaults.look;
+  const coverage = coverageLabel(light, device);
+  // A white look while the strip is per-LED is mixed from RGB, not the strip's real white.
+  const approximate = on && look.kind === 'white' && status?.mode === 'per_led';
 
   return (
     <div className="light">
@@ -133,9 +143,19 @@ function LightRow({
         <span className="tag" style={{ background: tagColor(light) }} />
         <div className="light-name">
           <strong>{light.name}</strong>
-          <span className="muted small">
-            {capLabel[cap]} · LEDs {formatRanges(light.ranges) || 'none'}
+          <span className={`muted small${coverage.warn ? ' warn' : ''}`}>
+            {capLabel[cap]} · {coverage.text}
+            {coverage.note && (
+              <span className="info" title={coverage.note} aria-label={coverage.note}>
+                {coverage.warn ? ' ⚠' : ' ⓘ'}
+              </span>
+            )}
           </span>
+          {approximate && (
+            <span className="chip" title={modeExplanation(status)}>
+              approximate white
+            </span>
+          )}
         </div>
 
         <label className="switch" title={on ? 'Turn off' : 'Turn on'}>
@@ -149,15 +169,15 @@ function LightRow({
             type="range"
             min={1}
             max={255}
-            value={state?.brightness ?? 255}
+            value={state?.brightness ?? light.defaults.brightness}
             title="Brightness"
             onChange={(e) => send({ state: 'ON', brightness: Number(e.target.value) })}
           />
         )}
-        {(cap === 'rgb' || cap === 'rgb_ct') && (
+        {cap === 'rgb' && (
           <input
             type="color"
-            value={rgbToHex(state?.color ?? light.defaults.color)}
+            value={rgbToHex(lookRgb(look))}
             title="Color"
             onChange={(e) => {
               const [r, g, b] = hexToRgb(e.target.value);
@@ -165,20 +185,10 @@ function LightRow({
             }}
           />
         )}
-        {cap === 'rgb_ct' && (
-          <input
-            className="slider ct"
-            type="range"
-            min={153}
-            max={500}
-            value={state?.colorTemp ?? 370}
-            title="Color temperature"
-            onChange={(e) => send({ state: 'ON', color_temp: Number(e.target.value) })}
-          />
-        )}
+        {cap === 'ct' && <KelvinSlider mireds={look.kind === 'white' ? look.mireds : MAX_MIREDS} onChange={(m) => send({ state: 'ON', color_temp: m })} />}
 
         <div className="row tight light-actions">
-          <button className="btn ghost" onClick={() => run(() => api.identify(light.id))} disabled={released} title="Flash this light's LEDs on the real strip">
+          <button className="btn ghost" onClick={() => run(() => api.identify(light.id))} disabled={released} title="Blink this light on the real strip (its groups, in group mode)">
             Identify
           </button>
           <button className="btn ghost" onClick={() => setEditing((x) => !x)}>
@@ -188,6 +198,22 @@ function LightRow({
       </div>
       {editing && <LightEditor light={light} run={run} onDone={() => setEditing(false)} />}
     </div>
+  );
+}
+
+/** Color temperature slider: warm (2700 K) on the left, cool (6500 K) on the right. Value in mireds. */
+function KelvinSlider({ mireds, onChange }: { mireds: number; onChange: (mireds: number) => void }) {
+  // Flip the mireds range so the slider runs warm → cool.
+  return (
+    <input
+      className="slider ct"
+      type="range"
+      min={MIN_MIREDS}
+      max={MAX_MIREDS}
+      value={MIN_MIREDS + MAX_MIREDS - mireds}
+      title={`${miredsToKelvin(mireds)} K`}
+      onChange={(e) => onChange(MIN_MIREDS + MAX_MIREDS - Number(e.target.value))}
+    />
   );
 }
 
@@ -209,26 +235,28 @@ function useDebouncedCommand(lightId: string, run: Run) {
 }
 
 function LightEditor({ light, run, onDone }: { light: VirtualLight; run: Run; onDone: () => void }) {
+  const d = light.defaults;
   const [name, setName] = useState(light.name);
   const [capability, setCapability] = useState<Capability>(light.capability);
-  const [color, setColor] = useState(rgbToHex(light.defaults.color));
-  const [brightness, setBrightness] = useState(light.defaults.brightness);
-  const [colorTemp, setColorTemp] = useState(light.defaults.colorTemp ?? 370);
-  const [useCt, setUseCt] = useState(light.defaults.colorTemp !== undefined);
+  const [kind, setKind] = useState<Look['kind']>(d.look.kind);
+  const [color, setColor] = useState(rgbToHex(lookRgb(d.look)));
+  const [mireds, setMireds] = useState(d.look.kind === 'white' ? d.look.mireds : MAX_MIREDS);
+  const [brightness, setBrightness] = useState(d.brightness);
   const [transitionMs, setTransitionMs] = useState(light.transitionMs);
   const [ranges, setRanges] = useState(formatRanges(light.ranges));
   const parsed = parseRanges(ranges);
+  // RGB lights default to a color and White lights to a white; On/off takes either.
+  const lookKind: Look['kind'] = capability === 'rgb' ? 'rgb' : capability === 'ct' ? 'white' : kind;
 
   const save = () =>
     run(async () => {
       if (!parsed) throw new Error('LED ranges must look like "0-9, 40-44, 50"');
-      const ct = capability === 'rgb_ct' && useCt;
       await api.updateLight(light.id, {
         name,
         capability,
         transitionMs,
         ranges: parsed,
-        defaults: { color: ct ? miredsToRgb(colorTemp) : hexToRgb(color), brightness, ...(ct ? { colorTemp } : {}) },
+        defaults: { brightness, look: lookKind === 'rgb' ? { kind: 'rgb', color: hexToRgb(color) } : { kind: 'white', mireds } },
       });
       onDone();
     });
@@ -248,7 +276,7 @@ function LightEditor({ light, run, onDone }: { light: VirtualLight; run: Run; on
           <small>Becomes the Home Assistant entity name.</small>
         </label>
         <label>
-          Capability
+          Type
           <select value={capability} onChange={(e) => setCapability(e.target.value as Capability)}>
             {Object.entries(capLabel).map(([v, l]) => (
               <option key={v} value={v}>
@@ -256,6 +284,13 @@ function LightEditor({ light, run, onDone }: { light: VirtualLight; run: Run; on
               </option>
             ))}
           </select>
+          <small>
+            {capability === 'ct'
+              ? 'Color temperature + brightness. Uses the strip\'s real white in group mode.'
+              : capability === 'rgb'
+                ? 'Any color + brightness.'
+                : 'Just on and off, always with the look below.'}
+          </small>
         </label>
         <label>
           Fade time (ms)
@@ -266,16 +301,23 @@ function LightEditor({ light, run, onDone }: { light: VirtualLight; run: Run; on
           <input value={ranges} onChange={(e) => setRanges(e.target.value)} aria-invalid={!parsed} placeholder="0-9, 40-44" />
         </label>
         <fieldset>
-          <legend>Default look when turned on</legend>
-          {capability === 'rgb_ct' && (
-            <label className="check">
-              <input type="checkbox" checked={useCt} onChange={(e) => setUseCt(e.target.checked)} />
-              Use color temperature
-            </label>
+          <legend>{capability === 'onoff' ? 'Look when on' : 'Default look when turned on'}</legend>
+          {capability === 'onoff' && (
+            <div className="segmented">
+              <button type="button" className={kind === 'rgb' ? 'on' : ''} onClick={() => setKind('rgb')}>
+                Color
+              </button>
+              <button type="button" className={kind === 'white' ? 'on' : ''} onClick={() => setKind('white')}>
+                White
+              </button>
+            </div>
           )}
           <div className="row tight">
-            {capability === 'rgb_ct' && useCt ? (
-              <input type="range" className="slider ct" min={153} max={500} value={colorTemp} onChange={(e) => setColorTemp(Number(e.target.value))} title={`${Math.round(1e6 / colorTemp)} K`} />
+            {lookKind === 'white' ? (
+              <>
+                <KelvinSlider mireds={mireds} onChange={setMireds} />
+                <span className="muted small">{miredsToKelvin(mireds)} K</span>
+              </>
             ) : (
               <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
             )}

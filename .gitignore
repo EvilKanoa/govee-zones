@@ -5,8 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Local runtime data (DATA_DIR in dev)
+# Local runtime data (DATA_DIR in dev), and local copies of a deployed config
 data/
+data-*/
 
 # Environment / secrets
 .env

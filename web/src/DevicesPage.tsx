@@ -1,5 +1,7 @@
 import { useState } from 'react';
-import type { AppSnapshot, Device, IdleBehavior } from '../../src/shared/types';
+import { groupCount, MAX_GROUPS } from '../../src/shared/groups';
+import type { AppSnapshot, Device } from '../../src/shared/types';
+import { MODE_LABEL } from './control';
 import { api } from './api';
 import type { Run } from './App';
 import { ModeBadge } from './StripPage';
@@ -13,7 +15,9 @@ const blank: Draft = {
   maxColorsPerPacket: 84,
   keepaliveMs: 2000,
   enabled: true,
-  idleBehavior: 'off',
+  groupSize: 4,
+  control: 'auto',
+  partialGroups: 'round',
 };
 
 export function DevicesPage({ snapshot, run, onOpen }: { snapshot: AppSnapshot; run: Run; onOpen: (id: string) => void }) {
@@ -44,6 +48,8 @@ export function DevicesPage({ snapshot, run, onOpen }: { snapshot: AppSnapshot; 
         />
       )}
 
+      <HowControlWorks />
+
       <div className="cards">
         {snapshot.devices.map((d) =>
           editing === d.id ? (
@@ -69,8 +75,8 @@ export function DevicesPage({ snapshot, run, onOpen }: { snapshot: AppSnapshot; 
                     <span className="warn"> (sent as {d.maxColorsPerPacket} colors)</span>
                   )}
                 </dd>
-                <dt>When idle</dt>
-                <dd>{idleLabel[d.idleBehavior]}</dd>
+                <dt>Control</dt>
+                <dd>{controlSummary(d)}</dd>
                 <dt>Lights</dt>
                 <dd>{snapshot.lights.filter((l) => l.deviceId === d.id).length}</dd>
                 {!d.enabled && (
@@ -100,16 +106,67 @@ export function DevicesPage({ snapshot, run, onOpen }: { snapshot: AppSnapshot; 
   );
 }
 
-const idleLabel: Record<IdleBehavior, string> = {
-  off: 'Turn strip off',
-  hold_black: 'Hold black (stay in streaming mode)',
-  release: 'Release to Govee app',
-};
+function controlSummary(d: Device): string {
+  if (d.groupSize <= 0) return 'Per-LED (group control off)';
+  const n = groupCount(d.ledCount, d.groupSize);
+  if (n > MAX_GROUPS) return `Per-LED (${n} groups is more than the tested ${MAX_GROUPS})`;
+  if (d.control === 'per_led') return 'Per-LED only';
+  return `Automatic · ${n} groups of ${d.groupSize}${d.partialGroups === 'exact' ? ' · exact LEDs' : ''}`;
+}
+
+/** Collapsible explainer for the two control methods (plan §4.5). */
+function HowControlWorks() {
+  return (
+    <details className="card help">
+      <summary>
+        <strong>How control works</strong>
+        <span className="muted small"> Groups vs Per-LED</span>
+      </summary>
+      <table className="compare">
+        <thead>
+          <tr>
+            <th />
+            <th>{MODE_LABEL.groups}</th>
+            <th>{MODE_LABEL.per_led}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Resolution</th>
+            <td>Groups of LEDs (4 on the H805A)</td>
+            <td>Single LEDs</td>
+          </tr>
+          <tr>
+            <th>White</th>
+            <td>The strip's real white, matching the Govee app (2700–6500 K)</td>
+            <td>Mixed from RGB: about as bright, slightly off-color</td>
+          </tr>
+          <tr>
+            <th>If govee-zones stops</th>
+            <td>The lights stay as they are</td>
+            <td>The strip freezes on its last frame in streaming mode</td>
+          </tr>
+          <tr>
+            <th>Changes</th>
+            <td>Glide over about half a second (the strip's firmware)</td>
+            <td>Instant</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="muted small">
+        Group control is the normal mode. A light that doesn't line up with the groups is rounded to whole groups (its edges
+        move by at most 2 LEDs), unless the strip is set to use exact LEDs. Per-LED control is used for the pixel finder and
+        test chase, for lights set to use exact LEDs, when the strip is set to Per-LED only, and for strips with more than{' '}
+        {MAX_GROUPS} groups. When every light is off, the strip turns off; use Release to Govee for the app's scenes.
+      </p>
+    </details>
+  );
+}
 
 function DeviceForm({ initial, onSave, onCancel }: { initial: Draft; onSave: (d: Draft) => void; onCancel?: () => void }) {
   const [d, setD] = useState<Draft>(initial);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((x) => ({ ...x, [k]: v }));
-  const num = (k: 'ledCount' | 'maxColorsPerPacket' | 'keepaliveMs') => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const num = (k: 'ledCount' | 'maxColorsPerPacket' | 'keepaliveMs' | 'groupSize') => (e: React.ChangeEvent<HTMLInputElement>) =>
     set(k, Number(e.target.value));
 
   return (
@@ -142,17 +199,64 @@ function DeviceForm({ initial, onSave, onCancel }: { initial: Draft; onSave: (d:
           Keepalive (ms)
           <input type="number" min={250} step={250} value={d.keepaliveMs} onChange={num('keepaliveMs')} />
         </label>
-        <label>
-          When all lights are off
-          <select value={d.idleBehavior} onChange={(e) => set('idleBehavior', e.target.value as IdleBehavior)}>
-            {Object.entries(idleLabel).map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
+      <fieldset className="groups-form">
+        <legend>Groups</legend>
+        <label>
+          LEDs per group
+          <input type="number" min={0} max={16} value={d.groupSize} onChange={num('groupSize')} />
+          <small>
+            How many LEDs the strip controls together: 4 on the H805A. 0 turns group control off.{' '}
+            {groupNote(d.ledCount, d.groupSize)}
+          </small>
+        </label>
+        <div className="radio-group" role="radiogroup" aria-label="Control method">
+          <span className="radio-title">Control method</span>
+          <label className="radio">
+            <input type="radio" checked={d.control === 'auto'} disabled={d.groupSize <= 0} onChange={() => set('control', 'auto')} />
+            <span>
+              <strong>Automatic</strong> (recommended)
+              <small>
+                Uses group control whenever it can: real white that matches the Govee app, and the strip keeps its lights even
+                if govee-zones stops. Switches to per-LED control only for single-LED tools like the pixel finder.
+              </small>
+            </span>
+          </label>
+          <label className="radio">
+            <input type="radio" checked={d.control === 'per_led' || d.groupSize <= 0} onChange={() => set('control', 'per_led')} />
+            <span>
+              <strong>Per-LED only</strong>
+              <small>
+                Always controls single LEDs. Changes are instant, but white is mixed from RGB (slightly off-color), and if
+                govee-zones stops, the strip freezes on its last frame in streaming mode.
+              </small>
+            </span>
+          </label>
+        </div>
+        {d.control === 'auto' && d.groupSize > 0 && (
+          <div className="radio-group" role="radiogroup" aria-label="Lights that don't line up with groups">
+            <span className="radio-title">Lights that don't line up with groups</span>
+            <label className="radio">
+              <input type="radio" checked={d.partialGroups === 'round'} onChange={() => set('partialGroups', 'round')} />
+              <span>
+                <strong>Round to whole groups</strong> (default)
+                <small>Keeps real white and group control. A light's edges move to the nearest group boundary (at most 2 LEDs).</small>
+              </span>
+            </label>
+            <label className="radio">
+              <input type="radio" checked={d.partialGroups === 'exact'} onChange={() => set('partialGroups', 'exact')} />
+              <span>
+                <strong>Use exact LEDs</strong>
+                <small>
+                  Keeps exact LED ranges by switching the whole strip to per-LED control while such a light is on. Other lights
+                  lose real white during that time.
+                </small>
+              </span>
+            </label>
+          </div>
+        )}
+        <small className="muted">The strip turns off when every light is off. Use Release to Govee for app scenes.</small>
+      </fieldset>
       <label className="check">
         <input type="checkbox" checked={d.enabled} onChange={(e) => set('enabled', e.target.checked)} />
         Enabled
@@ -188,4 +292,12 @@ export function ConfirmDelete({ label, onConfirm }: { label: string; onConfirm: 
       {label}
     </button>
   );
+}
+
+function groupNote(ledCount: number, groupSize: number): string {
+  if (groupSize <= 0) return '';
+  const n = groupCount(ledCount, groupSize);
+  return n > MAX_GROUPS
+    ? `That's ${n} groups: more than the ${MAX_GROUPS} that have been tested, so this strip uses per-LED control.`
+    : `That's ${n} groups.`;
 }

@@ -85,7 +85,8 @@ main > .error, .app > .error { margin: 12px auto 0; max-width: 1168px; display: 
 .notice { background: var(--warn-bg); border-color: var(--warn-border); }
 
 .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
-.mode-streaming { background: #dcfce7; color: #166534; }
+.mode-groups { background: #dcfce7; color: #166534; }
+.mode-per_led { background: #fef3c7; color: #92400e; }
 .mode-idle { background: #e5e7eb; color: #374151; }
 .mode-released { background: #ede9fe; color: #5b21b6; }
 .mode-error { background: #fee2e2; color: #991b1b; }
@@ -122,9 +123,37 @@ legend { font-weight: 500; padding: 0 4px; }
 .cell-live { position: absolute; inset: 0 0 7px 0; border-radius: 3px 3px 0 0; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08); }
 .cell-tag { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; border-radius: 0 0 2px 2px; }
 .cell.overlap .cell-tag { height: 7px; }
+/* Rounding to groups: amber marks LEDs that rounding gives to a different light. */
+.cell.changed .cell-tag { height: 7px; box-shadow: 0 0 0 2px #f59e0b; }
+.cell.changed .cell-live { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08), 0 -2px 0 0 #f59e0b; }
+.rounding-halo { fill: rgb(0 0 0 / 0.6); stroke: #f59e0b; }
+.cell.changed.real-white::after { display: none; }
+.round-mark {
+  position: absolute; left: 0; right: 0; top: 2px; text-align: center; font-size: 12px; line-height: 14px; font-weight: 700;
+  pointer-events: none; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 3px #000;
+}
+.round-mark-arrow { stroke: #000; stroke-linejoin: round; pointer-events: none; }
+.round-mark-svg { text-anchor: middle; font-weight: 700; paint-order: stroke; stroke: #000; pointer-events: none; }
+.rounding-bar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.legend-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: rgb(0 0 0 / 0.6); border: 2px solid #f59e0b; }
+.segmented.small button { padding: 3px 10px; font-size: 13px; }
 .cell.selected { outline: 2px solid #fff; outline-offset: 1px; z-index: 1; }
 .cell:hover { outline: 1px solid rgb(255 255 255 / 0.6); }
 .cell-index { position: absolute; top: 28px; left: 0; font-size: 9px; color: #8b93a0; pointer-events: none; }
+
+/* Group dividers (strip view): a gap + bar where each group starts, bands on alternate groups. */
+.strip.has-groups .cell.group-start { margin-left: 6px; }
+.strip.has-groups .cell.group-start::before {
+  content: ''; position: absolute; left: -5px; top: -4px; bottom: -4px; width: 2px; border-radius: 1px;
+  background: rgb(255 255 255 / 0.75); pointer-events: none;
+}
+.strip.has-groups:not(.groups-active) .cell.group-start::before { background: rgb(255 255 255 / 0.3); }
+.strip.has-groups .cell.band { box-shadow: 0 -5px 0 -2px rgb(255 255 255 / 0.18); }
+/* Real white (group mode): a small white dot on the first LED of each real-white group. */
+.cell.real-white::after {
+  content: ''; position: absolute; top: 3px; left: 3px; width: 5px; height: 5px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.6); pointer-events: none;
+}
 
 .selection-bar {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px;
@@ -142,8 +171,29 @@ legend { font-weight: 500; padding: 0 4px; }
 .handle { cursor: grab; color: var(--muted); letter-spacing: -2px; padding: 0 2px; user-select: none; }
 .tag { width: 12px; height: 12px; border-radius: 3px; flex: none; }
 .slider { width: 120px; }
-.slider.ct { background: linear-gradient(90deg, #aaccff, #ffd9a8, #ffad5e); border-radius: 999px; height: 6px; appearance: none; }
+.slider.ct { background: linear-gradient(90deg, #ffad5e, #ffd9a8, #dbe7ff); border-radius: 999px; height: 6px; appearance: none; }
 .light-editor { border-top: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+
+/* Group control explanations */
+.chip { align-self: flex-start; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: #fef3c7; color: #92400e; margin-top: 2px; cursor: help; }
+.info { cursor: help; }
+.warn { color: #b45309; }
+.mode-why { margin: 0; }
+.groups-form { display: flex; flex-direction: column; gap: 10px; }
+.radio-group { display: flex; flex-direction: column; gap: 6px; }
+.radio-title { font-weight: 500; }
+label.radio { flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 400; cursor: pointer; }
+label.radio input { margin-top: 3px; }
+label.radio span { display: flex; flex-direction: column; gap: 2px; }
+.help summary { cursor: pointer; }
+.compare { border-collapse: collapse; width: 100%; font-size: 13px; }
+.compare th, .compare td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+.compare thead th { border-top: 0; }
+.compare tbody th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+@media (prefers-color-scheme: dark) {
+  .chip, .mode-per_led { background: #3a2a0c; color: #fcd34d; }
+  .warn { color: #fbbf24; }
+}
 
 /* Toggle switch */
 .switch { position: relative; width: 38px; height: 22px; flex: none; }
@@ -183,6 +233,10 @@ label.inline input { width: 120px; }
 .house-path { fill: none; stroke: rgb(255 255 255 / 0.25); stroke-linejoin: round; }
 .house-path.editing { stroke: #facc15; }
 .led-selected { fill: none; stroke: #fff; }
+.group-dividers { opacity: 0.4; pointer-events: none; }
+.group-dividers.active { opacity: 1; }
+.divider-halo { stroke: rgb(0 0 0 / 0.75); stroke-linecap: round; }
+.divider { stroke: #fff; stroke-linecap: round; }
 .led-index { fill: #c7ccd4; text-anchor: middle; paint-order: stroke; stroke: rgb(0 0 0 / 0.7); stroke-width: 3px; pointer-events: none; }
 .vertex circle { fill: #facc15; stroke: #000; cursor: grab; }
 .vertex.active circle { fill: #fff; stroke: var(--accent); }
