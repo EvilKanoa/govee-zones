@@ -296,8 +296,20 @@ The popover also has a two-line "Segments vs Per-LED" explainer (same text as §
 
 ### 4.3 Strip view / house view
 
-- Segment boundaries drawn as tick marks (strip) or small notches on the outline (house) when
-  `segmentCount > 0`.
+- **Required: group dividers are always visible in both views** whenever segment control is
+  available (group size set and the strip fits the mask). A group is the smallest unit segment
+  control can drive (4 LEDs on the H805A test strip).
+  - **Strip view:** a divider line between every pair of groups, clearly heavier than the gaps
+    between single LEDs. The cells of one group read as one block (e.g. alternating subtle
+    background bands per group).
+  - **House view:** a short tick across the traced outline at every group boundary, placed at
+    the boundary's LED position on the path, so the dividers follow corners and bends. They
+    scale with zoom, stay readable over the background photo (contrasting halo), and are
+    drawn above the background and below the LED dots.
+  - Both views share one helper that turns `groupSize`/`ledCount` into boundary LED indices,
+    so the two views can't disagree.
+  - Dividers stay visible in per-LED mode too (dimmed), so it's always clear where lights
+    will round to.
 - **Selection snaps to whole segments** by default when segments are set; a "Fine (single LEDs)"
   toggle in the tool bar turns snapping off.
 - In segment mode the preview shows the rounded result. Segments lit with real white get a subtle
