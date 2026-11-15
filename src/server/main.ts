@@ -4,6 +4,7 @@ import pino from 'pino';
 import { loadConfig } from './config.js';
 import { Engine } from './engine.js';
 import { createServer } from './http.js';
+import { MqttBridge } from './mqtt.js';
 import { Store } from './store.js';
 import { simulatedTransport, udpTransport } from './transport.js';
 
@@ -20,9 +21,12 @@ const engine = new Engine(store, transport, log.child({ module: 'engine' }));
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Built layout: dist/server/server/main.js → dist/web
 const webRoot = path.resolve(here, '../../web');
-const app = await createServer({ store, engine, log, webRoot, dataDir: config.dataDir });
+const { url: mqttUrl, ...mqttOpts } = config.mqtt;
+const mqtt = mqttUrl ? new MqttBridge(store, engine, log.child({ module: 'mqtt' }), { url: mqttUrl, ...mqttOpts }) : null;
+const app = await createServer({ store, engine, mqtt, log, webRoot, dataDir: config.dataDir });
 
-if (!config.mqtt.host) log.warn('MQTT_HOST not set: MQTT/Home Assistant bridge disabled (web UI only)');
+if (mqtt) log.info({ url: mqttUrl, baseTopic: config.mqtt.baseTopic }, 'mqtt bridge enabled');
+else log.warn('MQTT_HOST not set: MQTT/Home Assistant bridge disabled (web UI only)');
 log.info({ dataDir: config.dataDir, simulate: config.simulate }, 'starting');
 
 engine.start();
@@ -35,6 +39,7 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   log.info({ signal }, 'shutting down: applying idle behavior');
   await engine.stop();
+  await mqtt?.close();
   store.flush();
   await app.close();
   await transport.close();

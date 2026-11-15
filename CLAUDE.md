@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-`SPEC.md` is the design brief. The first pass implements everything except the MQTT/Home Assistant bridge (SPEC §5) and Docker packaging. Without `MQTT_HOST`, the service runs with the web UI only. The web UI sends light commands in the same HA JSON-schema shape (`LightCommand`) through `Engine.command`, which is the path the MQTT bridge should use.
+`SPEC.md` is the design brief. Everything is implemented except Docker packaging. Without `MQTT_HOST`, the service runs with the web UI only. The web UI and the MQTT bridge both send HA JSON-schema `LightCommand`s through `Engine.command`.
 
 ## Commands
 
@@ -20,10 +20,10 @@ Node 22.12+ is required (Volta pins Node 24 in `package.json`); use pnpm.
 ## Layout
 
 - `src/shared/` — types, color math and `layout` (LED positions along a traced house outline) used by both server and web (no Node imports).
-- `src/server/` — `protocol` (packet encoding), `compositor` (pure), `lifecycle` (pure `decide()`), `commands` (pure HA command → state), `engine` (per-device tick loop, transitions, identify/pixel/test overrides), `transport` (15 ms pacing with frame coalescing; simulate variant), `store` (single JSON file, atomic writes, emits `change`), `http` (REST + `/ws`).
+- `src/server/` — `protocol` (packet encoding), `compositor` (pure), `lifecycle` (pure `decide()`), `commands` (pure HA command → state), `engine` (per-device tick loop, transitions, identify/pixel/test overrides), `transport` (15 ms pacing with frame coalescing; simulate variant), `store` (single JSON file, atomic writes, emits `change`), `http` (REST + `/ws`), `mqtt` (HA bridge: discovery is diffed against what was published, so edits and deletes update or clear configs; stale retained configs under the node id are cleared on connect; HA's `color_temp` is in kelvin on the wire and mireds internally).
 - `web/` — Vite + React UI. It gets the full state as a `snapshot` message over `/ws`, plus throttled full-resolution `frame` messages. `StripPage` owns the shared selection and the active tool, and renders either `StripView` or `HouseView` (SVG outline editor/brush select). Touch gestures use pointer capture plus hit-testing (`elementFromPoint` or SVG coordinates), never `pointerenter`.
 - House photos are stored as `DATA_DIR/backgrounds/<deviceId>.jpg`, outside the JSON config. `device.layout.background` is a cache-busting version number.
-- `test/` — unit tests. `engine.test.ts` drives the engine with fake timers and a recording transport.
+- `test/` — unit tests. `engine.test.ts` drives the engine with fake timers and a recording transport. `mqtt.test.ts` runs the bridge against an in-process `aedes` broker, so no Mosquitto is needed.
 
 ## What this is
 
@@ -66,7 +66,6 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 
 ## Remaining work (SPEC §12)
 
-1. The MQTT bridge (SPEC §5), with a Mosquitto integration test.
-2. A Dockerfile, a compose example with a healthcheck (`/healthz` exists), and an Unraid template.
+1. A Dockerfile, a compose example with a healthcheck (`/healthz` exists), and an Unraid template.
 
 SPEC §10 has a Python reference script confirmed working on the real device.

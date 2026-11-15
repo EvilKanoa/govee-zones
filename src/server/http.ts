@@ -9,13 +9,21 @@ import type { WebSocket } from 'ws';
 import { z } from 'zod';
 import type { AppSnapshot, ServerMessage } from '../shared/types.js';
 import type { Engine } from './engine.js';
+import type { MqttBridge } from './mqtt.js';
 import { configImport, deviceInput, devicePatch, lightCommand, lightInput, lightPatch } from './schemas.js';
 import type { Store } from './store.js';
 
 /** Live preview frames are throttled per device; the strip itself may get ~30 fps. */
 const PREVIEW_INTERVAL_MS = 66;
 
-export async function createServer(opts: { store: Store; engine: Engine; log: Logger; webRoot?: string; dataDir: string }) {
+export async function createServer(opts: {
+  store: Store;
+  engine: Engine;
+  mqtt?: MqttBridge | null;
+  log: Logger;
+  webRoot?: string;
+  dataDir: string;
+}) {
   const { store, engine } = opts;
   // Request logs at warn+ only: sliders in the UI send many small commands.
   const app = Fastify({ loggerInstance: opts.log.child({ module: 'http' }, { level: 'warn' }) });
@@ -34,6 +42,7 @@ export async function createServer(opts: { store: Store; engine: Engine; log: Lo
     states: store.states,
     flags: store.allFlags,
     status: engine.allStatus(),
+    mqtt: opts.mqtt?.status ?? 'disabled',
   });
   const notFound = () => Object.assign(new Error('not found'), { statusCode: 404 });
 
@@ -157,6 +166,7 @@ export async function createServer(opts: { store: Store; engine: Engine; log: Lo
   };
   store.on('change', pushSnapshot);
   engine.on('status', pushSnapshot);
+  opts.mqtt?.on('status', pushSnapshot);
 
   const lastPreview = new Map<string, number>();
   engine.on('frame', (deviceId, pixels) => {

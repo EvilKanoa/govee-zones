@@ -2,7 +2,7 @@
 
 Split one Govee RGBIC strip (e.g. H805A Permanent Outdoor Lights Elite) into independent **virtual lights**, controlled fully locally over the LAN "razer"/DreamView streaming protocol. See [`SPEC.md`](SPEC.md) for the full design.
 
-> **Status:** first pass. Web UI, compositor, streaming lifecycle and protocol CLI are implemented. The MQTT / Home Assistant bridge is not yet built; the service runs web-UI-only when `MQTT_HOST` is unset. Docker packaging is not yet built.
+> **Status:** the web UI, compositor, streaming lifecycle, MQTT / Home Assistant bridge and protocol CLI are implemented. Without `MQTT_HOST` the service runs with the web UI only. Docker packaging is not built yet.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ DATA_DIR=./data node dist/server/server/main.js   # UI served on http://localhos
 
 | Var | Purpose | Default |
 |---|---|---|
-| `MQTT_HOST` | Broker host (bridge disabled when unset) | — |
+| `MQTT_HOST` | Broker host or URL (`mqtt://`, `mqtts://`, `ws://`). The bridge is disabled when unset. | — |
 | `MQTT_PORT` | Broker port | `1883` |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | Broker auth | — |
 | `MQTT_DISCOVERY_PREFIX` | HA discovery prefix | `homeassistant` |
@@ -39,6 +39,32 @@ DATA_DIR=./data node dist/server/server/main.js   # UI served on http://localhos
 | `DATA_DIR` | Persistent storage | `/data` (`./data` in `pnpm dev`) |
 | `LOG_LEVEL` | `debug` shows every frame in simulate mode | `info` |
 | `SIMULATE` | Log datagrams instead of sending | `false` |
+
+## Home Assistant (MQTT)
+
+Set `MQTT_HOST` (and credentials, if any) and the service announces itself through MQTT Discovery. Nothing needs to be configured in HA. To try it against your real broker before deploying:
+
+```sh
+MQTT_HOST=192.168.x.x MQTT_USERNAME=… MQTT_PASSWORD=… pnpm dev
+```
+
+The topbar shows an **MQTT** dot (green when connected). Each strip becomes one HA device with:
+
+- **One light per virtual light**, using the JSON schema. Supported modes follow the light's capability: `onoff`, `brightness`, `rgb`, or `rgb` + `color_temp` (in kelvin, 2000–6535 K). Transitions are honoured.
+- A **Release to Govee** switch (config). ON stops streaming so the Govee app or govee2mqtt can take over. Commands are still stored.
+- A **Mode** sensor (diagnostic): `streaming`, `idle`, `released` or `error`. The error message is available as an attribute.
+
+Topics, with `<base>` = `MQTT_BASE_TOPIC`:
+
+| Topic | Payload |
+|---|---|
+| `<base>/status` | `online` / `offline` (retained; LWT) |
+| `<base>/light/<id>/set` · `/state` | HA JSON-schema command / retained state |
+| `<base>/device/<id>/release/set` · `/state` | `ON` / `OFF` |
+| `<base>/device/<id>/status` | `{"mode":…,"error":…,"sent_colors":…}` (retained) |
+| `<prefix>/<component>/<base>/<id>/config` | discovery |
+
+Renaming, editing or deleting a light in the UI updates or removes its HA entity. When the service starts, it also clears retained discovery configs under its node id for anything that no longer exists. Entity IDs come from the light/device IDs, so **export your config and import it on the deployed instance** to keep the same HA entities. Only run one instance per `MQTT_BASE_TOPIC` at a time. For a throwaway test, use a different base topic (e.g. `govee-zones-dev`) and delete that HA device afterwards.
 
 ## Using the web UI
 

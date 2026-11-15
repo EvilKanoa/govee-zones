@@ -4,8 +4,8 @@ const bool = (v: string | undefined, d: boolean) => (v === undefined || v === ''
 
 export interface AppConfig {
   mqtt: {
-    host?: string;
-    port: number;
+    /** Broker URL built from MQTT_HOST/MQTT_PORT; undefined disables the bridge. */
+    url?: string;
     username?: string;
     password?: string;
     discoveryPrefix: string;
@@ -21,8 +21,7 @@ export interface AppConfig {
 export function loadConfig(env = process.env): AppConfig {
   return {
     mqtt: {
-      host: env.MQTT_HOST || undefined,
-      port: Number(env.MQTT_PORT ?? 1883),
+      url: brokerUrl(env.MQTT_HOST, env.MQTT_PORT),
       username: env.MQTT_USERNAME || undefined,
       password: env.MQTT_PASSWORD || undefined,
       discoveryPrefix: env.MQTT_DISCOVERY_PREFIX ?? 'homeassistant',
@@ -33,4 +32,11 @@ export function loadConfig(env = process.env): AppConfig {
     logLevel: env.LOG_LEVEL ?? 'info',
     simulate: bool(env.SIMULATE, false),
   };
+}
+
+/** MQTT_HOST may be a bare host (mqtt://host:MQTT_PORT) or a full URL (mqtt://, mqtts://, ws://). */
+function brokerUrl(host: string | undefined, port: string | undefined) {
+  if (!host) return undefined;
+  if (host.includes('://')) return host;
+  return `mqtt://${host}:${port || 1883}`;
 }

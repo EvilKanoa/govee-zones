@@ -68,7 +68,14 @@ export function App() {
             hidden
             onChange={(e) => e.target.files?.[0] && onImport(e.target.files[0])}
           />
-          <span className={live.connected ? 'dot ok' : 'dot bad'} title={live.connected ? 'connected' : 'disconnected'} />
+          {live.snapshot && live.snapshot.mqtt !== 'disabled' && (
+            <span className="conn-status" title={`MQTT broker: ${live.snapshot.mqtt}`}>
+              MQTT <span className={live.snapshot.mqtt === 'connected' ? 'dot ok' : 'dot bad'} />
+            </span>
+          )}
+          <span className="conn-status" title={`Live connection to the server: ${live.connected ? 'connected' : 'disconnected'}`}>
+            Server <span className={live.connected ? 'dot ok' : 'dot bad'} />
+          </span>
         </div>
       </header>
 

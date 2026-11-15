@@ -92,6 +92,7 @@ export interface AppSnapshot extends ConfigSnapshot {
   states: Record<string, LightState>;
   flags: Record<string, DeviceFlags>;
   status: Record<string, DeviceStatus>;
+  mqtt: 'disabled' | 'connecting' | 'connected';
 }
 
 export type ServerMessage =
