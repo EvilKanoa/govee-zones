@@ -168,6 +168,25 @@ describe('MqttBridge (integration)', () => {
     expect(json(t.discovery('switch', `${d.id}_release`))).toBeTruthy(); // device entities stay
   });
 
+  it('a Release toggled in the web UI reaches HA, including after a reconnect', async () => {
+    const d = store.addDevice(DEV);
+    await start();
+    await until(() => seen.get(t.releaseState(d.id)) === 'OFF');
+    engine.setReleased(d.id, true); // the web UI path
+    await until(() => seen.get(t.releaseState(d.id)) === 'ON');
+    await until(() => json(t.deviceStatus(d.id))?.mode === 'released');
+
+    // Toggled while the bridge is down: published when it connects.
+    await bridge!.close();
+    bridge = null;
+    engine.setReleased(d.id, false);
+    engine.setReleased(d.id, true);
+    store.setFlags(d.id, { released: false });
+    seen.delete(t.releaseState(d.id));
+    await start();
+    await until(() => seen.get(t.releaseState(d.id)) === 'OFF');
+  });
+
   it('goes offline on close', async () => {
     await start();
     await bridge!.close();

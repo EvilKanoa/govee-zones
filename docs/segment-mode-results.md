@@ -203,3 +203,19 @@ Running the new service against the strip (`pnpm dev`, no MQTT):
 Fix: parking is dropped, and nothing is sent after `turn off` (plan §3.5a, invariant I7). Round 3's
 F15 ("turn off doesn't stick while razer is enabled") is unproven: the park frames that followed
 may be what turned it back on. R10 keeps `turn_off` after `disable` anyway, which is safe either way.
+
+### Follow-up: the "random" turn-offs were the prod instance (2026-11-15)
+
+A debug log of a local run (`data/debug.log`) showed govee-zones never sent `turn off`, yet the strip
+kept going dark about once a minute, even with the local instance released. The cause was the prod
+instance: its web UI said "released", but it wasn't (HA's Release switch disagreed, and toggling it
+in HA changed prod's mode), so prod kept driving the strip with its old `hold_black` behavior
+(black razer frames, which override group output). So:
+
+- The random turn-offs, and the "came back briefly, then off" results with the Govee app, were
+  prod. They say nothing about the strip's firmware or about govee-zones.
+- The first observation ("dimmed down, then came back on") is still most likely our park frames
+  after `turn off` (F10); not sending anything after `turn off` (I7) stays either way. Re-check it
+  once prod is out of the way.
+- The UI/HA mismatch couldn't be reproduced in the current code (`test/mqtt.test.ts` covers a
+  Release from the web UI reaching HA, including after a reconnect). Watch for it after redeploying.
