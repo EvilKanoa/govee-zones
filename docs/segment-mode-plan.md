@@ -6,8 +6,13 @@ and the tests that lock it in are in [`segment-mode-testing.md`](segment-mode-te
 
 Scope: **this house's strip first.** An H805A, 60 LEDs, controllable in 15 groups of 4. Other
 strips work as long as they fit the tested mask (≤ 24 groups); anything bigger falls back to
-per-LED control with a clear reason. This is v0, so there's no compatibility layer: `rgb_ct` is
-removed and the status modes are renamed outright.
+per-LED control with a clear reason. This is v0, so there's no compatibility layer: `rgb_ct` and
+`dimmable` are removed, the idle behaviour setting is removed, and the status modes are renamed
+outright.
+
+**Dev vs deployed config:** the `./data` config used by `pnpm dev` on the laptop is a throwaway dev
+setup (its devices and lights are test data). The real setup lives in the container's `DATA_DIR`
+on Unraid. Any hand conversion of removed fields applies to that deployed config.
 
 ---
 
@@ -68,15 +73,16 @@ Not verified, handled conservatively:
 
 ### 2.1 Capabilities
 
-`Capability = 'onoff' | 'dimmable' | 'rgb' | 'ct'`. `rgb_ct` is removed; existing `rgb_ct` lights
-in the config must be changed by hand to `ct` or `rgb` (no migration code).
+`Capability = 'onoff' | 'rgb' | 'ct'`. `rgb_ct` and `dimmable` are removed: `rgb` and `ct` both
+include brightness, so a dimmable fixed look is a `ct` light (white) or an `rgb` light (color).
+Lights using a removed capability are changed by hand in the deployed config (no migration code);
+the schema rejects them.
 
-| Capability | HA `supported_color_modes` | Commands accepted | Default look |
+| Capability | HA `supported_color_modes` | Commands accepted | Turns on to |
 |---|---|---|---|
-| `onoff` | `onoff` | `state` | color **or** white |
-| `dimmable` | `brightness` | `state`, `brightness` | color **or** white |
-| `rgb` | `rgb` | `state`, `brightness`, `color` | color |
-| `ct` | `color_temp` | `state`, `brightness`, `color_temp` | white (required) |
+| `onoff` | `onoff` | `state` | its fixed default look: a color **or** a white, at a fixed brightness |
+| `rgb` | `rgb` | `state`, `brightness`, `color` | its default color and brightness |
+| `ct` | `color_temp` | `state`, `brightness`, `color_temp` | its default white and brightness |
 
 ```ts
 type Look = { kind: 'rgb'; color: RGB } | { kind: 'white'; mireds: number };
@@ -95,6 +101,11 @@ per-LED rendering and the preview.
 | `groupSize` | int 0–16 | 4 | LEDs per mask bit. 0 = group control off. |
 | `control` | `'auto' \| 'per_led'` | `'auto'` | UI **Control method**: Automatic / Per-LED only. |
 | `partialGroups` | `'round' \| 'exact'` | `'round'` | UI **Lights that don't line up with groups**: Round to whole groups / Use exact LEDs. |
+
+`idleBehavior` (`off` / `hold_black` / `release`) is **removed**. When every light is off, the strip
+is always turned off (§3.3). `hold_black` only existed to stop per-LED mode reverting to the
+Govee scene, and groups hold by themselves. `release`-when-idle can't hand back to a scene in
+group mode. The manual **Release to Govee** switch stays, and is how app scenes are reached.
 
 Group count = ⌈ledCount / groupSize⌉. Group control is **available** when `groupSize > 0`,
 group count ≤ 24 (U1), and `control = 'auto'`.
@@ -177,11 +188,11 @@ The planner ignores the current mode. Fade-related deferral lives in `decide()`.
 
 ### 3.3 Lifecycle (`decide()`, pure)
 
-Inputs: `enabled`, `released`, `idleBehavior`, `groupsAvailable`, `want`
+Inputs: `enabled`, `released`, `groupsAvailable`, `want`
 (`'none' | 'groups' | 'per_led'`; none = nothing visible and no override), `held`
 (`'none' | 'groups' | 'per_led'`), `fading` (a transition is running on this strip).
 
-Output: `before` (actions), `frame` (`'groups' | 'groups_off' | 'composite' | 'black' | null`),
+Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 `after` (actions), `held`, `mode`, `reason`. Actions: `brightness_max`, `turn_on`, `enable`,
 `disable`, `turn_off`.
 
@@ -196,14 +207,9 @@ Output: `before` (actions), `frame` (`'groups' | 'groups_off' | 'composite' | 'b
 | R7 | want per_led, held none | `turn_on`, `brightness_max`, `enable` | composite | – | per_led / per_led |
 | R8 | want per_led, held groups | `enable` | composite | – | per_led / per_led (hard cut, accepted) |
 | R9 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| R10 | want none, idle `off` | held per_led: `disable`, `turn_off`. Held groups: `turn_off` | – | – | none / idle |
-| R11 | want none, idle `release` | held per_led: `disable` (the Govee scene comes back) | held groups: groups_off (all dark, power stays on; nothing comes back by itself) | – | none / idle |
-| R12 | want none, idle `hold_black`, groups available | as R3/R4/R6 | groups_off | as R3 | groups / idle |
-| R13 | want none, idle `hold_black`, groups not available | as R7/R9 | black | – | per_led / idle |
-| R14 | want none, held none, not R12/R13 | – | – | – | none / idle (startup sends nothing, so a restart doesn't kill a Govee scene) |
-
-With group control, `release` and `hold_black` both end with the strip powered and dark. The UI
-says so (§4.1).
+| R10 | want none, held per_led | `disable`, `turn_off` | – | – | none / idle |
+| R11 | want none, held groups | `turn_off` (the groups keep their state; the next entry re-sends before `turn_on`) | – | – | none / idle |
+| R12 | want none, held none | – | – | – | none / idle (startup sends nothing, so a restart doesn't kill a Govee scene) |
 
 **Invariants** (asserted over the full input cross-product):
 
@@ -213,7 +219,7 @@ says so (§4.1).
 - I3: Razer frames only when the resulting held is `per_led`.
 - I4: Entering groups from none sends frames before `turn_on`.
 - I5: A fade never causes a per-LED → groups switch (R5).
-- I6: Nothing held + nothing wanted + idle ≠ hold_black → no output at all.
+- I6: Nothing held + nothing wanted → no output at all.
 
 ### 3.4 Engine (`engine.ts`)
 
@@ -240,7 +246,8 @@ says so (§4.1).
 - **Preview.** The `frame` message shows **what the strip shows**: in group mode, the rounded
   group looks expanded to LEDs (white via `miredsToRgb`), plus `mode` and a per-group
   `realWhite: boolean[]`, so the UI can mark real-white groups.
-- **Shutdown.** Held per_led: as today (`hold_black` exits like `off`). Held groups: **send
+- **Shutdown.** Held per_led: `disable`, `turn_off` (per-LED can't hold; never show the Govee
+  scene unless released). Held groups: **send
   nothing**; the lights stay (F9). On the next start R3 re-sends the state; frames come before
   `turn_on`, so nothing blinks.
 - **IP change.** Held per_led: `disable` to the old IP. Held groups: nothing to the old IP. Then
@@ -301,9 +308,8 @@ groups are always visible.
     moves by at most 2 LEDs to the nearest group boundary."*
   - **Use exact LEDs.** *"Keeps exact LED ranges by switching the whole strip to per-LED control
     while such a light is on. Other lights lose real white during that time."*
-- **When all lights are off** gets group-aware labels: *Turn strip off* · *Go dark, leave power
-  on* (`release` and `hold_black` with group control: the Govee scene doesn't come back by itself)
-  · *Hand back to the Govee app* (per-LED `release` only).
+- The "When all lights are off" setting is gone. The device card says instead: *"The strip turns
+  off when every light is off. Use Release to Govee for app scenes."*
 - A one-line note under the section: *"Group control changes glide over about half a second;
   that's the strip's firmware."*
 
@@ -341,9 +347,10 @@ The popover also has a short "Groups vs Per-LED" explainer (the §0 table in two
 
 ### 4.4 Light row and editor
 
-- Capability: On/off · Dimmable · RGB · White (color temperature).
-- Default look for On/off and Dimmable: a **Color / White** toggle, then a color picker or a
-  kelvin slider (2700–6500 K, labelled in K).
+- Capability: On/off · RGB · White (color temperature).
+- Default look: RGB → color + brightness; White → kelvin slider (2700–6500 K, labelled in K) +
+  brightness; On/off → a **Color / White** toggle, then the picker or kelvin slider, plus the fixed
+  brightness it turns on at.
 - The subtitle shows coverage:
   - aligned: `White · groups 6–7`
   - rounded: `White · LEDs 22–29 → groups 6–7` with ⓘ explaining rounding
@@ -362,7 +369,8 @@ too many groups).
 
 1. Geometry (`groups.ts`) + planner + `decide()` with the full test matrices (testing plan §2).
 2. Protocol packing + engine integration + simulate decoding + engine scenarios.
-3. Data model (`ct`, `look`, device fields, status) + commands + MQTT + their tests.
+3. Data model (`ct`, `look`, device fields, removed `dimmable`/`idleBehavior`, status) + commands
+   + MQTT + their tests.
 4. UI (§4), with the group dividers first, then a manual pass in `pnpm dev:sim`.
 5. Hardware acceptance checklist (testing plan §3), then update `CLAUDE.md`, `SPEC.md` and the README.
 

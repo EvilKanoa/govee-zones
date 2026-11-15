@@ -4,7 +4,8 @@ Results from `pnpm cli probe` against the real strip, what they establish, what 
 and how they change [`segment-mode-plan.md`](segment-mode-plan.md). Raw answer files are in
 `data/probe-*.json` (not committed).
 
-Strip: H805A at 192.168.2.27, configured as 60 LEDs.
+Strip: H805A at 192.168.2.27, 60 LEDs (the real house installation). The `./data` config on the
+dev laptop is test data, not the deployed setup.
 
 Confidence is about the *observation*. Answers are judged by eye outdoors, so a single answer
 that carries a big decision gets re-checked a different way before it's relied on.
@@ -152,6 +153,8 @@ File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
 | Brightness pin | Keep `brightness 100` on entry and every 30 s in **both** modes: LAN brightness scales segment output, so a change in the Govee app would otherwise dim everything. |
 | Release / un-release | Confirmed: on un-release, sending our state takes over from an app scene. |
 | Per-LED white | RGB-mixed white is about as bright, but the wrong tint. The UI says "approximate white", not "dimmer". |
+| Idle behaviour | Removed: all off → `turn_off`. Groups hold by themselves, so `hold_black` is unnecessary, and `release`-when-idle can't bring back a scene in group mode |
+| Capabilities | `dimmable` removed too: `rgb` and `ct` include brightness |
 | UI wording | "Groups of 4 LEDs", never "segments", to avoid confusion with the Govee app. |
 
 The plan has been rewritten around these results ([`segment-mode-plan.md`](segment-mode-plan.md) §1 lists them as facts F1–F14).

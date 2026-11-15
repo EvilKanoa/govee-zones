@@ -49,6 +49,7 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 
 ## Gotchas
 
+- `./data` (used by `pnpm dev`) is a throwaway dev config, not the deployed setup. The real config lives in `DATA_DIR` in the container on Unraid.
 - `pino-pretty` is a devDependency. `main.ts` only loads it when stdout is a TTY and `NODE_ENV` isn't `production` (the image sets it), so `docker run -it` doesn't crash.
 - Zod 4 applies `.default()` inside `.partial()`. Patch schemas (`devicePatch`, `lightPatch`) must come from the default-free base shapes in `schemas.ts`, or a partial update silently resets every field it doesn't mention. `test/schemas.test.ts` guards this.
 

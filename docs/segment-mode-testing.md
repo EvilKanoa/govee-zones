@@ -163,8 +163,8 @@ hand-written rule table. Key rows written out:
 |---|---|---|---|---|
 | onoff | rgb `ff0000` | on | rgb `ff0000` 100 % | off |
 | onoff | white 370 mireds | on | white 2703 K 100 % | off |
-| dimmable | white 370 | on, bri 128 | white 2703 K 50 % | off |
-| dimmable | white 370 | on, bri 1 | white 2703 K **1 %** (never 0 while on) | off |
+| onoff | white 370, default bri 128 | on | white 2703 K 50 % | off |
+| ct | white 370 | on, bri 1 | white 2703 K **1 %** (never 0 while on) | off |
 | rgb | – | on, `00ff00`, bri 255 | rgb `00ff00` 100 % | off |
 | ct | white 250 | on, bri 255 | white 4000 K 100 % | off |
 | any | any | off | off | off |
@@ -187,12 +187,13 @@ hand-written rule table. Key rows written out:
 | ct bri 255 → 51 | pct 100, 80, 60, 40, 20 |
 | ct 2700 → 6500 K | mireds 370 → 154 linear; pct constant |
 | rgb red → blue | RGB lerp |
-| dimmable (white default) off → on | Fades in at the white look from 0; no color sweep |
+| onoff (white default) off → on | Fades in at the white look from 0; no color sweep |
 | B (white, prio 1) fading out over A (rgb, prio 0) | pct blends; kind = B's below 50 %, A's from 50 % |
 
 ### 2.4 `test/lifecycle.test.ts`: `decide()` (rewritten)
 
-Defaults: `enabled`, not `released`, idle `off`, groups available, not fading. Columns: before /
+Defaults: `enabled`, not `released`, groups available, not fading. There is no idle-behaviour
+input any more: all off always ends in `turn_off`. Columns: before /
 frame / after → held, mode (reason).
 
 | # | Inputs | before | frame | after | → held / mode |
@@ -208,21 +209,13 @@ frame / after → held, mode (reason).
 | 9 | want per_led, held none | turn_on, brightness_max, enable | composite | – | per_led / per_led |
 | 10 | want per_led, held groups (fading or not) | enable | composite | – | per_led / per_led |
 | 11 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| 12 | none, idle off, held per_led | disable, turn_off | – | – | none / idle |
-| 13 | none, idle off, held groups | turn_off | – | – | none / idle |
-| 14 | none, idle off, held none | – | – | – | none / idle |
-| 15 | none, idle release, held per_led | disable | – | – | none / idle |
-| 16 | none, idle release, held groups | – | groups_off | – | none / idle |
-| 17 | none, idle release, held none | – | – | – | none / idle |
-| 18 | none, hold_black, held none | brightness_max | groups_off | turn_on | groups / idle |
-| 19 | none, hold_black, held groups | – | groups_off | – | groups / idle |
-| 20 | none, hold_black, held per_led, not fading | disable | groups_off | – | groups / idle |
-| 21 | none, hold_black, no groups, held none | turn_on, brightness_max, enable | black | – | per_led / idle |
-| 22 | none, hold_black, no groups, held per_led | – | black | – | per_led / idle |
-| 23 | none, hold_black, no groups, held groups | enable | black | – | per_led / idle |
+| 12 | none, held per_led | disable, turn_off | – | – | none / idle |
+| 13 | none, held groups | turn_off | – | – | none / idle |
+| 14 | none, held none | – | – | – | none / idle |
+| 15 | none, held per_led, groups not available | disable, turn_off | – | – | none / idle |
 
-**Invariant sweeps** over the full cross-product (enabled 2 × released 2 × idle 3 × available 2 ×
-want 3 × held 3 × fading 2 = 432 cases): I1–I6 from plan §3.3.
+**Invariant sweeps** over the full cross-product (enabled 2 × released 2 × available 2 × want 3 ×
+held 3 × fading 2 = 144 cases): I1–I6 from plan §3.3.
 
 ### 2.5 `test/engine.test.ts`: scenarios (fake timers, recording transport)
 
@@ -234,18 +227,18 @@ The recorder decodes `ptReal` into labels such as `g[0-1]:white:2703`, `g[2-14]:
 | E1 | 3 aligned `ct` lights; turn on A | `bright:100`, group frames (A white, rest off, A's pct), then `turn:1`; mode groups; **no** `enable` |
 | E2 | E1, then 60 s | A full re-send + `bright:100` every 30 s; nothing else |
 | E3 | E1, change A's brightness | Only a brightness frame for A's groups |
-| E4 | E1, all off, idle off | `turn:0` only; mode idle; then silence |
-| E5 | E1, all off, idle release | `g[all]:off`; no `turn:0`; then silence |
+| E4 | E1, all off | `turn:0` only; mode idle; then silence |
+| E5 | All off while per-LED (control = per_led) | `disable`, `turn:0`; then silence |
 | E6 | + `rgb` light partly covering a group, exact; then off with a 1 s fade | `enable` + razer frames; reason exact_leds; razer continues until the fade ends, then `disable` + group frames |
 | E7 | Same as E6 but round | Never `enable`; the light painted on its rounded groups |
 | E8 | Identify in group mode | Group datagrams alternating every 700 ms; never `enable`; back to the plan after 5 s |
 | E9 | Pixel finder in group mode | `enable` → razer → `disable` → full group state; no `turn:0` |
 | E10 | `control = per_led` | Never `ptReal`; matches the existing razer tests |
-| E11 | `groupSize = 0` | All existing engine tests pass unchanged |
+| E11 | `groupSize = 0` | The existing razer engine tests pass, minus the removed idle behaviours (`hold_black`, `release`) |
 | E12 | 200 LEDs, size 4 | Per-LED; reason too_many_groups |
 | E13 | Release in group mode | No datagrams; commands stored; un-release → full state, then `turn:1` |
 | E14 | `stop()` in group mode | No datagrams |
-| E15 | `stop()` in per-LED mode | As today |
+| E15 | `stop()` in per-LED mode | `disable`, `turn:0` |
 | E16 | Restart with a light on | `bright:100`, full group state, `turn:1`; no `turn:0`, no razer |
 | E17 | 1 s fade in group mode | Group datagrams ~100 ms apart (≈ 10), pct monotonic |
 | E18 | 20 commands in 50 ms | ≤ 1 update per 100 ms |
@@ -259,8 +252,8 @@ The recorder decodes `ptReal` into labels such as `g[0-1]:white:2703`, `g[2-14]:
 
 | File | Cases |
 |---|---|
-| `commands.test.ts` | `ct` takes brightness and color_temp, ignores color; color_temp clamped to 154–370 mireds; `rgb` ignores color_temp; onoff/dimmable with a white default turn on white |
-| `schemas.test.ts` | `rgb_ct` rejected; white defaults outside 2700–6500 K rejected; new device fields have defaults in input and none in patch |
+| `commands.test.ts` | `ct` takes brightness and color_temp, ignores color; color_temp clamped to 154–370 mireds; `rgb` ignores color_temp; onoff with a white default turns on white at its fixed brightness, and ignores brightness and color_temp |
+| `schemas.test.ts` | `rgb_ct`, `dimmable` and `idleBehavior` rejected; white defaults outside 2700–6500 K rejected; new device fields have defaults in input and none in patch |
 | `mqtt.test.ts` | `ct` discovery payload exactly (min/max 2700/6500); mode sensor options; status with `reason`/`detail`/`groups`; a capability change republishes the same topic |
 | `transport.test.ts` | Simulated transport logs decoded `ptReal` |
 | `web/` helpers *(new, pure)* | `coverageLabel` → "groups 6–7" / "LEDs 22–29 → groups 6–7" / "uses exact LEDs"; `snapSelection`; `modeExplanation(status)` → the exact strings in plan §4.2; divider positions from `groupBoundaries` for both views |
@@ -276,7 +269,7 @@ Run on the house strip after implementation; record pass/fail in the PR.
 | H1 | Three `ct` zones on at 2700 / 4000 / 6500 K | Real white matching the app; badge Groups |
 | H2 | Dim each from HA, 100 → 1 % | Smooth; others unaffected; 1 % is lit |
 | H3 | HA transition 2 s | Smooth (glide + 10/s steps) |
-| H4 | All off (idle off), then on again | No flash of the old state |
+| H4 | All off (the strip turns off), then on again | No flash of the old state |
 | H5 | Restart the container with lights on | **No blink** |
 | H6 | Stop the container for 5 min | Lights stay on |
 | H7 | Pixel finder, then wait | Per-LED (hard cut in), back to Groups cleanly |
