@@ -1,14 +1,14 @@
 # Segment mode: implementation plan
 
-Status: **built** (backend, MQTT and UI; hardware acceptance §3 of the testing plan still to run). Two rounds of hardware probing on the real strip settled the
+Status: **built and locally tested** on the house strip (turn-off, restart, Govee app interaction). The hardware acceptance checklist (testing plan §3) is for after deploying. Two rounds of hardware probing on the real strip settled the
 protocol and behaviour. The evidence is in [`segment-mode-results.md`](segment-mode-results.md),
 and the tests that lock it in are in [`segment-mode-testing.md`](segment-mode-testing.md).
 
 Scope: **this house's strip first.** An H805A, 60 LEDs, controllable in 15 groups of 4. Other
 strips work as long as they fit the tested mask (≤ 24 groups); anything bigger falls back to
-per-LED control with a clear reason. This is v0, so there's no compatibility layer: `rgb_ct` and
-`dimmable` are removed, the idle behaviour setting is removed, and the status modes are renamed
-outright.
+per-LED control with a clear reason. `rgb_ct` and `dimmable` are removed, the idle behaviour
+setting is removed, and the status modes are renamed outright. Older configs are converted on load
+(`src/server/migrate.ts`, with a backup of the original).
 
 **Dev vs deployed config:** the `./data` config used by `pnpm dev` on the laptop is a throwaway dev
 setup (its devices and lights are test data). The real setup lives in the container's `DATA_DIR`
@@ -25,7 +25,7 @@ The strip accepts two local LAN commands on UDP 4003:
 | Resolution | Groups of 4 LEDs | Single LEDs |
 | White | Real white, matches the Govee app (2700–6500 K) | Mixed from RGB: about as bright, wrong tint |
 | Holding state | The strip holds it, even across `turn off`/`on` | Holds the last frame ≥ 120 s with nothing sent (F16), but the strip stays in razer mode; we keep a keepalive |
-| If govee-zones stops | Lights stay as they are | Frozen on the last frame, still in razer mode (a clean stop exits and parks, §3.5a) |
+| If govee-zones stops | Lights stay as they are | Frozen on the last frame, still in razer mode (a clean stop exits and turns the strip off, §3.5a) |
 | Changes | The firmware glides every change (< 0.5 s) | Instant |
 
 Group control becomes the normal way to drive a strip, and per-LED becomes the precise fallback.
@@ -77,8 +77,8 @@ Not verified, handled conservatively:
 
 `Capability = 'onoff' | 'rgb' | 'ct'`. `rgb_ct` and `dimmable` are removed: `rgb` and `ct` both
 include brightness, so a dimmable fixed look is a `ct` light (white) or an `rgb` light (color).
-Lights using a removed capability are changed by hand in the deployed config (no migration code);
-the schema rejects them.
+Older configs are converted on load and on import (`src/server/migrate.ts`): `dimmable` → `rgb`,
+`rgb_ct` → `ct` (color-temperature default) or `rgb`. The schema rejects the removed values.
 
 | Capability | HA `supported_color_modes` | Commands accepted | Turns on to |
 |---|---|---|---|

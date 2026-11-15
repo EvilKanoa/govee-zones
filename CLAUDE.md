@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-`SPEC.md` is the design brief, and everything in it is implemented. Without `MQTT_HOST`, the service runs with the web UI only. The web UI and the MQTT bridge both send HA JSON-schema `LightCommand`s through `Engine.command`.
+`SPEC.md` is the original design brief, and everything in it is implemented. Group (segment) control was added on top: `docs/segment-mode-plan.md` (design), `docs/segment-mode-results.md` (hardware evidence; it overrides SPEC where they disagree) and `docs/segment-mode-testing.md` (tests and probe). Without `MQTT_HOST`, the service runs with the web UI only. The web UI and the MQTT bridge both send HA JSON-schema `LightCommand`s through `Engine.command`.
 
 ## Commands
 
@@ -75,6 +75,7 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 ## Open items
 
 - Still unverified on hardware (SPEC §9): whether the strip recovers within the 30 s reassert after a power cycle mid-stream, and whether `00` in the packet header is a length high byte.
-- White balance must be tuned per strip after deployment.
+- White balance must be tuned per strip after deployment (now only affects per-LED white and RGB colors).
+- Hardware acceptance checklist (`docs/segment-mode-testing.md` §3): run after deploying; the local test covered turn-off, restart and Govee app interaction.
 
 SPEC §10 has a Python reference script confirmed working on the real device.
