@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Device, VirtualLight } from '../../src/shared/types';
-import { coverageLabel, modeExplanation, ownersTitle, roundedCoverage, roundingActive, roundingAt, snapSelection } from '../src/control';
+import { coverageLabel, markGlyph, modeExplanation, ownersChanged, ownersTitle, roundedCoverage, roundingActive, roundingMarks, snapSelection } from '../src/control';
 import { rangesToSet } from '../src/ranges';
 
 const dev = (p: Partial<Device> = {}): Device => ({
@@ -29,32 +29,49 @@ describe('rounding display', () => {
     expect(roundingActive(dev({ groupSize: 0 }))).toBe(false);
   });
 
-  it('marks LEDs added and dropped by rounding', () => {
+  it('marks LEDs that rounding gives to a different light, with who had them as set', () => {
     const exact = exactCoverage([gutter, tiny]);
     const rounded = roundedCoverage(exact, [gutter, tiny], dev());
-    const at = (i: number) => roundingAt(exact[i], rounded[i]);
-    expect(at(8).added).toEqual([gutter]); // gained
-    expect(at(15).added).toEqual([gutter]);
-    expect(at(9)).toEqual({ added: [], dropped: [] }); // unchanged
-    expect(at(16)).toEqual({ added: [], dropped: [] });
-    expect(at(0).added).toEqual([tiny]); // tiny snaps onto group 0
-    expect(at(4).dropped).toEqual([tiny]); // and loses LED 4
-    expect(ownersTitle(exact[4], rounded[4])).toBe(' · Tiny (dropped by rounding)');
-    expect(ownersTitle(exact[8], rounded[8])).toBe(' · Gutter (added by rounding)');
+    const changed = exact.map((c, i) => ownersChanged(c, rounded[i]));
+    expect(changed.flatMap((c, i) => (c ? [i] : []))).toEqual([0, 1, 2, 4, 8, 15]);
+    expect(ownersTitle(exact[8], rounded[8])).toBe(' · as set: no light → rounded: Gutter');
+    expect(ownersTitle(exact[4], rounded[4])).toBe(' · as set: Tiny → rounded: no light');
+    expect(ownersTitle(exact[9], rounded[9])).toBe(' · Gutter');
+  });
+
+  it('adjacent lights: the boundary moves, so one light gains what the other loses', () => {
+    const left = light('Left', [[0, 9]]); // group 2 (8-11) is 2/4 → included
+    const right = light('Right', [[10, 19]]); // group 2 is 2/4 → included too
+    const exact = exactCoverage([left, right]);
+    const rounded = roundedCoverage(exact, [left, right], dev());
+    // Both round onto group 2 (LEDs 8-11); the later-created light wins it, so the boundary moves left.
+    expect(ownersTitle(exact[8], rounded[8])).toBe(' · as set: Left → rounded: Right');
+    expect(ownersTitle(exact[9], rounded[9])).toBe(' · as set: Left → rounded: Right');
+    expect(ownersTitle(exact[11], rounded[11])).toBe(' · Right'); // unchanged
+  });
+
+  it('arrows point the way the gaining light grows; ✕ where rounding leaves an LED dark', () => {
+    const porch = light('Porch', [[0, 9]]); // group 2 half → Gutter (created later) wins it
+    const gut = light('Gutter2', [[10, 21]]); // also takes group 5 (20-23)
+    const garage = light('Garage', [[24, 40]]); // group 10 (40-43) is 1/4 → LED 40 goes dark
+    const exact = exactCoverage([porch, gut, garage]);
+    const marks = roundingMarks(exact, roundedCoverage(exact, [porch, gut, garage], dev()));
+    const glyphs = marks.map((m, i) => (m ? `${i}${markGlyph(m)}${m.light.name}` : null)).filter(Boolean);
+    expect(glyphs).toEqual(['8◀Gutter2', '9◀Gutter2', '22▶Gutter2', '23▶Gutter2', '40✕Garage']);
   });
 
   it('aligned lights change nothing', () => {
     const a = light('A', [[0, 7]]);
     const exact = exactCoverage([a]);
     const rounded = roundedCoverage(exact, [a], dev());
-    expect(rounded.every((r, i) => roundingAt(exact[i], r).added.length + roundingAt(exact[i], r).dropped.length === 0)).toBe(true);
+    expect(exact.some((c, i) => ownersChanged(c, rounded[i]))).toBe(false);
   });
 });
 
 describe('labels', () => {
   it('coverageLabel', () => {
     expect(coverageLabel(light('A', [[20, 27]]), dev()).text).toBe('groups 6–7');
-    expect(coverageLabel(light('G', [[22, 29]]), dev()).text).toBe('LEDs 22-29 → groups 6–8');
+    expect(coverageLabel(light('G', [[22, 29]]), dev()).text).toBe('LEDs 22-29 → 20-31');
     expect(coverageLabel(light('G', [[22, 29]]), dev({ partialGroups: 'exact' }))).toMatchObject({ text: 'LEDs 22-29', warn: true });
     expect(coverageLabel(light('G', [[22, 29]]), dev({ groupSize: 0 })).text).toBe('LEDs 22-29');
   });

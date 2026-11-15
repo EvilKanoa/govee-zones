@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUT_WIDTH, ledPositions, type Layout, type LayoutPoint } from '../../src/shared/layout';
 import { api } from './api';
 import { ConfirmDelete } from './DevicesPage';
-import { ownersTitle, roundingAt } from './control';
+import { markGlyph, ownersTitle, type RoundingMark } from './control';
 import { tagColor } from './ranges';
 import { livePx, type ViewProps } from './StripPage';
 
@@ -31,7 +31,7 @@ async function prepPhoto(file: File): Promise<{ blob: Blob; aspect: number }> {
   return { blob, aspect: bmp.height / bmp.width };
 }
 
-export function HouseView({ device, coverage, rounded, frame, boundaries, groupsActive, selection, tool, onSelect, onPixel, run }: ViewProps) {
+export function HouseView({ device, coverage, exact, rounded, marks, frame, boundaries, groupsActive, selection, tool, onSelect, onPixel, run }: ViewProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [layout, setLayout] = useState<Layout>(device.layout ?? emptyLayout);
@@ -239,20 +239,11 @@ export function HouseView({ device, coverage, rounded, frame, boundaries, groups
         {positions.map((q, i) => {
           if (!q) return null;
           const covering = coverage[i];
-          // With rounding, the ring shows what group control lights; added LEDs get dots, dropped ones a faint dashed ring.
-          const owners = rounded ? rounded[i] : covering;
-          const { added, dropped } = rounded ? roundingAt(covering, rounded[i]) : { added: [], dropped: [] };
-          const outOnly = owners.length === 0 && dropped.length > 0;
-          const top = outOnly ? dropped[dropped.length - 1] : owners[owners.length - 1];
-          const strokeW = Math.max(1.5 * unitsPerPx, ledR * 0.35);
-          const dash =
-            added.length ? `${strokeW * 0.6} ${strokeW * 0.9}`
-            : outOnly ? `${ledR * 0.35} ${ledR * 0.35}`
-            : owners.length > 1 ? `${ledR * 0.6} ${ledR * 0.4}`
-            : undefined;
+          const top = covering[covering.length - 1];
           const selected = selection.has(i) || brush?.has(i);
           return (
             <g key={i}>
+              {marks?.[i] && <circle cx={q.x} cy={q.y} r={ledR * 1.55 + 3 * unitsPerPx} className="rounding-halo" strokeWidth={1.5 * unitsPerPx} />}
               {selected && <circle cx={q.x} cy={q.y} r={ledR + 2.5 * unitsPerPx} className="led-selected" strokeWidth={2 * unitsPerPx} />}
               <circle
                 cx={q.x}
@@ -260,12 +251,10 @@ export function HouseView({ device, coverage, rounded, frame, boundaries, groups
                 r={ledR}
                 fill={livePx(frame, i)}
                 stroke={top ? tagColor(top) : 'rgb(255 255 255 / 0.25)'}
-                strokeOpacity={outOnly ? 0.55 : 1}
-                strokeWidth={strokeW}
-                strokeDasharray={dash}
-                strokeLinecap={added.length ? 'round' : undefined}
+                strokeWidth={Math.max(1.5 * unitsPerPx, ledR * 0.35)}
+                strokeDasharray={covering.length > 1 ? `${ledR * 0.6} ${ledR * 0.4}` : undefined}
               >
-                <title>{`LED ${i}${ownersTitle(covering, rounded?.[i])}`}</title>
+                <title>{`LED ${i}${ownersTitle(exact[i], rounded?.[i])}`}</title>
               </circle>
               {i % 10 === 0 && (
                 <text x={q.x} y={q.y - ledR - 4 * unitsPerPx} className="led-index" fontSize={10 * unitsPerPx}>
@@ -275,6 +264,10 @@ export function HouseView({ device, coverage, rounded, frame, boundaries, groups
             </g>
           );
         })}
+
+        {tool !== 'outline' &&
+          marks &&
+          positions.map((q, i) => (q && marks[i] ? <MarkArrow key={`m${i}`} m={marks[i]!} at={q} prev={positions[i - 1]} next={positions[i + 1]} size={ledR * 1.15 + 1.5 * unitsPerPx} unit={unitsPerPx} /> : null))}
 
         {tool === 'outline' &&
           layout.points.map((q, i) => (
@@ -388,4 +381,34 @@ function nearestTo(positions: (Pt | null)[], p: Pt): number | null {
     if (d < bestD) [best, bestD] = [i, d];
   });
   return best;
+}
+
+/** Rounding marker on an LED: a triangle along the outline toward where the gaining light grows, or ✕ if it goes dark. */
+function MarkArrow({ m, at, prev, next, size, unit }: { m: RoundingMark; at: Pt; prev: Pt | null | undefined; next: Pt | null | undefined; size: number; unit: number }) {
+  const color = tagColor(m.light);
+  if (m.kind === 'dark' || m.dir === 0) {
+    return (
+      <text x={at.x} y={at.y} className="round-mark-svg" fontSize={size * 1.6} fill={color} strokeWidth={3 * unit} dominantBaseline="central">
+        {markGlyph(m)}
+      </text>
+    );
+  }
+  // Direction of increasing LED index along the path at this LED.
+  const a = prev ?? at;
+  const b = next ?? at;
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const tx = ((b.x - a.x) / len) * m.dir;
+  const ty = ((b.y - a.y) / len) * m.dir;
+  const nx = -ty;
+  const ny = tx;
+  // Notched arrowhead (tip, back corners, notch): reads one way even at an angle.
+  const p = (along: number, across: number) => `${at.x + (tx * along + nx * across) * size},${at.y + (ty * along + ny * across) * size}`;
+  return (
+    <polygon
+      points={[p(1.15, 0), p(-0.75, 0.8), p(-0.3, 0), p(-0.75, -0.8)].join(' ')}
+      fill={color}
+      className="round-mark-arrow"
+      strokeWidth={1.5 * unit}
+    />
+  );
 }

@@ -123,19 +123,20 @@ legend { font-weight: 500; padding: 0 4px; }
 .cell-live { position: absolute; inset: 0 0 7px 0; border-radius: 3px 3px 0 0; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08); }
 .cell-tag { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; border-radius: 0 0 2px 2px; }
 .cell.overlap .cell-tag { height: 7px; }
-/* Rounding to groups: hatched = added by rounding, dashed outline = dropped by rounding. */
-.cell.rounded-in .cell-tag::after {
-  content: ''; position: absolute; inset: 0; border-radius: inherit;
-  background: repeating-linear-gradient(135deg, rgb(0 0 0 / 0.55) 0 2px, transparent 2px 4px);
+/* Rounding to groups: amber marks LEDs that rounding gives to a different light. */
+.cell.changed .cell-tag { height: 7px; box-shadow: 0 0 0 2px #f59e0b; }
+.cell.changed .cell-live { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08), 0 -2px 0 0 #f59e0b; }
+.rounding-halo { fill: rgb(0 0 0 / 0.6); stroke: #f59e0b; }
+.cell.changed.real-white::after { display: none; }
+.round-mark {
+  position: absolute; left: 0; right: 0; top: 2px; text-align: center; font-size: 12px; line-height: 14px; font-weight: 700;
+  pointer-events: none; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 3px #000;
 }
-.cell.rounded-out .cell-tag { background: transparent; border: 1px dashed; box-sizing: border-box; opacity: 0.8; }
-.rounding-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 0; }
-.legend-swatch { display: inline-block; width: 18px; height: 6px; border-radius: 2px; vertical-align: middle; background: #60a5fa; }
-.legend-swatch.added { background: repeating-linear-gradient(135deg, rgb(0 0 0 / 0.55) 0 2px, transparent 2px 4px), #60a5fa; }
-.legend-swatch.dropped { background: transparent; border: 1px dashed #60a5fa; }
-.legend-swatch.house { width: 12px; height: 12px; border-radius: 50%; background: transparent; border: 2px solid #60a5fa; }
-.legend-swatch.house.added { border-style: dotted; }
-.legend-swatch.house.dropped { border: 2px dashed rgb(96 165 250 / 0.55); }
+.round-mark-arrow { stroke: #000; stroke-linejoin: round; pointer-events: none; }
+.round-mark-svg { text-anchor: middle; font-weight: 700; paint-order: stroke; stroke: #000; pointer-events: none; }
+.rounding-bar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.legend-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: rgb(0 0 0 / 0.6); border: 2px solid #f59e0b; }
+.segmented.small button { padding: 3px 10px; font-size: 13px; }
 .cell.selected { outline: 2px solid #fff; outline-offset: 1px; z-index: 1; }
 .cell:hover { outline: 1px solid rgb(255 255 255 / 0.6); }
 .cell-index { position: absolute; top: 28px; left: 0; font-size: 9px; color: #8b93a0; pointer-events: none; }

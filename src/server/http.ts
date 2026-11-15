@@ -154,9 +154,12 @@ export async function createServer(opts: {
     const s = JSON.stringify(m);
     for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
   };
+  /** Last preview per device: group mode only ticks on change, so new clients need it. */
+  const lastFrame = new Map<string, ServerMessage>();
   app.get('/ws', { websocket: true }, (socket) => {
     clients.add(socket);
     socket.send(JSON.stringify({ type: 'snapshot', data: snapshot() } satisfies ServerMessage));
+    for (const m of lastFrame.values()) socket.send(JSON.stringify(m));
     socket.on('close', () => clients.delete(socket));
   });
 
@@ -174,17 +177,37 @@ export async function createServer(opts: {
   opts.mqtt?.on('status', pushSnapshot);
 
   const lastPreview = new Map<string, number>();
+  const trailing = new Map<string, NodeJS.Timeout>();
   engine.on('frame', (deviceId, pixels, realWhite) => {
-    const now = Date.now();
-    if (now - (lastPreview.get(deviceId) ?? 0) < PREVIEW_INTERVAL_MS) return;
-    lastPreview.set(deviceId, now);
-    broadcast({
+    const m: ServerMessage = {
       type: 'frame',
       deviceId,
       pixels: Buffer.from(pixels).toString('base64'),
       mode: engine.status(deviceId).mode,
       realWhite,
-    });
+    };
+    lastFrame.set(deviceId, m);
+    const now = Date.now();
+    const wait = (lastPreview.get(deviceId) ?? 0) + PREVIEW_INTERVAL_MS - now;
+    clearTimeout(trailing.get(deviceId));
+    if (wait > 0) {
+      // Throttled: still deliver the latest frame once the interval passes (group mode may not tick again).
+      trailing.set(deviceId, setTimeout(() => {
+        lastPreview.set(deviceId, Date.now());
+        broadcast(lastFrame.get(deviceId)!);
+      }, wait));
+      return;
+    }
+    lastPreview.set(deviceId, now);
+    broadcast(m);
+  });
+  store.on('change', (e) => {
+    if (e.kind === 'device' && e.removed) lastFrame.delete(e.id);
+    if (e.kind === 'reset') {
+      for (const t of trailing.values()) clearTimeout(t);
+      trailing.clear();
+      lastFrame.clear();
+    }
   });
 
   // Built UI (production). In dev, Vite serves the UI and proxies /api and /ws here.

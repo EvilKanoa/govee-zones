@@ -1,7 +1,7 @@
 // Pure helpers that explain group vs per-LED control in the UI (plan §4).
 import { groupBoundaries, groupCount, groupsUnavailable, isAligned, roundToGroups } from '../../src/shared/groups';
 import type { Device, DeviceStatus, VirtualLight } from '../../src/shared/types';
-import { formatRanges, rangesToSet, setToRanges } from './ranges';
+import { formatRanges, setToRanges } from './ranges';
 
 /** Group control can be used on this strip at all (ignoring what's on right now). */
 export const groupsUsable = (d: Device) => !groupsUnavailable(d);
@@ -36,9 +36,11 @@ export function coverageLabel(light: VirtualLight, d: Device): Coverage {
   if (isAligned(light.ranges, d.ledCount, d.groupSize)) return { text: formatGroups(groups) };
   if (d.partialGroups === 'exact')
     return { text: `LEDs ${leds}`, note: 'Uses exact LEDs: the strip switches to Per-LED while this is on.', warn: true };
+  const lit = new Set<number>();
+  for (const g of groups) for (let i = g * d.groupSize; i < Math.min((g + 1) * d.groupSize, d.ledCount); i++) lit.add(i);
   return {
-    text: `LEDs ${leds} → ${formatGroups(groups)}`,
-    note: `Doesn't line up with the ${d.groupSize}-LED groups, so it's rounded to whole groups in group mode.`,
+    text: `LEDs ${leds} → ${formatRanges(setToRanges(lit))}`,
+    note: `Doesn't line up with the ${d.groupSize}-LED groups, so group mode lights ${formatGroups(groups)} (LEDs ${formatRanges(setToRanges(lit))}).`,
   };
 }
 
@@ -89,36 +91,57 @@ export function modeExplanation(s: DeviceStatus | undefined): string {
 export const roundingActive = (d: Device) => groupsUsable(d) && d.partialGroups === 'round';
 
 /**
- * Per LED, the lights that cover it after rounding to groups (what group control
- * actually lights), in the same paint order as `exact`.
+ * Per LED, the light group control actually shows there after rounding: one
+ * light per group, the highest in paint order (a group can only show one look).
  */
 export function roundedCoverage(exact: VirtualLight[][], lights: VirtualLight[], d: Device): VirtualLight[][] {
   const byLed: VirtualLight[][] = Array.from({ length: d.ledCount }, () => []);
   const ordered = [...lights].sort((a, b) => a.priority - b.priority || a.order - b.order);
   for (const l of ordered)
     for (const g of roundToGroups(l.ranges, d.ledCount, d.groupSize))
-      for (let i = g * d.groupSize; i < Math.min((g + 1) * d.groupSize, d.ledCount); i++) byLed[i].push(l);
+      for (let i = g * d.groupSize; i < Math.min((g + 1) * d.groupSize, d.ledCount); i++) byLed[i] = [l];
   return byLed.length === exact.length ? byLed : exact;
 }
 
-export interface RoundingAt {
-  /** Lights that light this LED only because of rounding. */
-  added: VirtualLight[];
-  /** Lights whose range includes this LED, but rounding leaves it out. */
-  dropped: VirtualLight[];
+/** Whether rounding gives this LED to a different light: compares the light that shows (the top one). */
+export function ownersChanged(exact: VirtualLight[], rounded: VirtualLight[]): boolean {
+  return exact[exact.length - 1] !== rounded[rounded.length - 1];
 }
 
-export function roundingAt(exact: VirtualLight[], rounded: VirtualLight[]): RoundingAt {
-  return { added: rounded.filter((l) => !exact.includes(l)), dropped: exact.filter((l) => !rounded.includes(l)) };
-}
-
-/** Tooltip suffix for an LED's owners, marking what rounding changed. */
+/** Tooltip suffix for an LED's owners; with rounding, says who it belongs to as set and when rounded. */
 export function ownersTitle(exact: VirtualLight[], rounded?: VirtualLight[]): string {
-  if (!rounded) return exact.length ? ' · ' + exact.map((l) => l.name).join(' < ') : '';
-  const { dropped } = roundingAt(exact, rounded);
-  const parts = [
-    ...rounded.map((l) => (exact.includes(l) ? l.name : `${l.name} (added by rounding)`)),
-    ...dropped.map((l) => `${l.name} (dropped by rounding)`),
-  ];
-  return parts.length ? ' · ' + parts.join(' < ') : '';
+  const names = (ls: VirtualLight[]) => (ls.length ? ls.map((l) => l.name).join(' < ') : 'no light');
+  if (!rounded || !ownersChanged(exact, rounded)) return exact.length ? ` · ${names(exact)}` : '';
+  return ` · as set: ${names(exact.slice(-1))} → rounded: ${names(rounded)}`;
 }
+
+/**
+ * How rounding changes one LED, for drawing an arrow on it:
+ * `grow` = `light` gains this LED, extending toward lower (-1) or higher (+1) LED numbers
+ * (0 if it has no LEDs of its own nearby); `dark` = rounding leaves the LED unlit, `light` loses it.
+ */
+export type RoundingMark = { kind: 'grow'; light: VirtualLight; dir: -1 | 0 | 1 } | { kind: 'dark'; light: VirtualLight };
+
+export function roundingMarks(exact: VirtualLight[][], rounded: VirtualLight[][]): (RoundingMark | undefined)[] {
+  const top = (ls: VirtualLight[]) => ls[ls.length - 1];
+  return exact.map((c, i) => {
+    if (!ownersChanged(c, rounded[i])) return undefined;
+    const gain = top(rounded[i]);
+    if (!gain) return { kind: 'dark', light: top(c) };
+    // The light grows away from its nearest LED as set.
+    let dir: -1 | 0 | 1 = 0;
+    for (let k = 1; k < exact.length; k++) {
+      if (i + k < exact.length && top(exact[i + k]) === gain) {
+        dir = -1;
+        break;
+      }
+      if (i - k >= 0 && top(exact[i - k]) === gain) {
+        dir = 1;
+        break;
+      }
+    }
+    return { kind: 'grow', light: gain, dir };
+  });
+}
+
+export const markGlyph = (m: RoundingMark) => (m.kind === 'dark' ? '✕' : m.dir < 0 ? '◀' : m.dir > 0 ? '▶' : '●');

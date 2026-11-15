@@ -377,10 +377,13 @@ The popover also has a short "Groups vs Per-LED" explainer (the §0 table in two
   - Both views use `groupBoundaries()` (§3.1), so they can't disagree.
   - In per-LED mode the dividers stay, dimmed, so it's always clear where lights will round to.
 - **Rounding is drawn on the LEDs** whenever it applies (group control usable, Round to whole
-  groups). The ownership marks show what group control lights. LEDs a light gains from rounding are
-  hatched (strip) or dotted (house); LEDs in a light's range that rounding drops get a dashed
-  outline (strip) or a faint dashed ring (house). Tooltips say "added/dropped by rounding", and a
-  legend appears under the view when anything is rounded.
+  groups). Rounding moves the boundaries between lights, so each LED it changes is marked with
+  an amber outline (strip) or a dark disc with an amber rim (house), plus an arrow in the color of
+  the light that gains the LED, pointing the way that light's edge moves (along the outline in the
+  house view). ✕ in the losing light's color marks an LED that rounding leaves dark. An "As set /
+  Rounded" toggle switches the light colors between the ranges as drawn and what group control
+  lights (one light per group: the highest in paint order). Tooltips say "as set: X → rounded: Y",
+  and light rows say "LEDs 9–14 → 8–15".
 - **Selection snaps to whole groups** by default; a "Fine (single LEDs)" toggle in the toolbar
   turns snapping off.
 - In group mode the preview shows the rounded result. Real-white groups get a subtle marker (a
