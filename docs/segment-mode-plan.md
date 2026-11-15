@@ -24,8 +24,8 @@ The strip accepts two local LAN commands on UDP 4003:
 |---|---|---|
 | Resolution | Groups of 4 LEDs | Single LEDs |
 | White | Real white, matches the Govee app (2700–6500 K) | Mixed from RGB: about as bright, wrong tint |
-| Holding state | The strip holds it, even across `turn off`/`on` | Needs a keepalive forever; reverts to the Govee scene ~60 s after the last frame |
-| If govee-zones stops | Lights stay as they are | The Govee scene comes back |
+| Holding state | The strip holds it, even across `turn off`/`on` | Holds the last frame ≥ 120 s with nothing sent (F16), but the strip stays in razer mode; we keep a keepalive |
+| If govee-zones stops | Lights stay as they are | Frozen on the last frame, still in razer mode (a clean stop exits and parks, §3.5a) |
 | Changes | The firmware glides every change (< 0.5 s) | Instant |
 
 Group control becomes the normal way to drive a strip, and per-LED becomes the precise fallback.
@@ -57,7 +57,9 @@ All from the two probe rounds; the rows link back to the results doc.
 | F11 | A group command ends a running Govee app scene | §3.5 |
 | F12 | LAN `brightness` scales group output too | §3.4 |
 | F13 | Per-LED → groups is clean in any order. Groups → per-LED is an instant hard cut (accepted, no mitigation) | §3.3 |
-| F14 | Group frames take effect **even while razer is enabled** | §3.3 invariant I2 |
+| F14 | Group frames take effect **even while razer is enabled** | §3.3 invariant I2, §3.5a |
+| F15 | `turn off` sent while razer is enabled **doesn't stick**: after `disable` the strip is on, showing its stored groups | §3.5a |
+| F16 | Razer with frames stopped (no `disable`) **holds the last frame ≥ 120 s**: no revert seen. `disable` then shows the stored groups | §3.4, §3.5a |
 
 Not verified, handled conservatively:
 
@@ -192,9 +194,9 @@ Inputs: `enabled`, `released`, `groupsAvailable`, `want`
 (`'none' | 'groups' | 'per_led'`; none = nothing visible and no override), `held`
 (`'none' | 'groups' | 'per_led'`), `fading` (a transition is running on this strip).
 
-Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
+Output: `before` (actions), `frame` (`'groups' | 'composite' | 'park' | null`),
 `after` (actions), `held`, `mode`, `reason`. Actions: `brightness_max`, `turn_on`, `enable`,
-`disable`, `turn_off`.
+`disable`, `turn_off`, `groups_dark` (one datagram setting every group off).
 
 | # | Condition | before | frame | after | → held / mode |
 |---|---|---|---|---|---|
@@ -207,15 +209,16 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 | R7 | want per_led, held none | `turn_on`, `brightness_max`, `enable` | composite | – | per_led / per_led |
 | R8 | want per_led, held groups | `enable` | composite | – | per_led / per_led (hard cut, accepted) |
 | R9 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| R10 | want none, held per_led | `disable`, `turn_off` | – | – | none / idle |
-| R11 | want none, held groups | `turn_off` (the groups keep their state; the next entry re-sends before `turn_on`) | – | – | none / idle |
+| R10 | want none, held per_led | groups available: `groups_dark` (all groups off; applies over the stream, F14, invisible because the composite is black by now), `disable`, `turn_off`. Otherwise: `disable`, `turn_off` | groups available: park (while off, F10) | – | none / idle |
+| R11 | want none, held groups | `turn_off` | park (while off; skipped if the stored state already matches) | – | none / idle |
 | R12 | want none, held none | – | – | – | none / idle (startup sends nothing, so a restart doesn't kill a Govee scene) |
 
 **Invariants** (asserted over the full input cross-product):
 
 - I1: Leaving `per_led` always starts with `disable`.
-- I2: No group frame is sent while held is `per_led` (F14: it would override the stream). R5
-  sends the composite instead.
+- I2: No group frame is sent while held is `per_led` (F14: it would override the stream), except
+  `groups_dark` immediately before `disable` on the way to off (R10). R5 sends the composite instead.
+- I2b: `turn_off` is never sent while razer is enabled (F15: it doesn't stick).
 - I3: Razer frames only when the resulting held is `per_led`.
 - I4: Entering groups from none sends frames before `turn_on`.
 - I5: A fade never causes a per-LED → groups switch (R5).
@@ -241,13 +244,16 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
   pacing, which fits in a 100 ms step). Razer frames keep the `frame` coalesce key. When the
   held mode changes, any queued datagrams of the other kind are dropped before `before` is
   queued (supports I2).
+- **Per-LED keepalive.** Kept at `keepaliveMs` (2 s) even though no revert was seen within
+  120 s (F16): it's cheap, and the revert time is unknown.
 - **Brightness pin.** `brightness_max` on entry and every 30 s, in both modes (F12). `enable` is
   re-sent with it in per-LED mode only.
 - **Preview.** The `frame` message shows **what the strip shows**: in group mode, the rounded
   group looks expanded to LEDs (white via `miredsToRgb`), plus `mode` and a per-group
   `realWhite: boolean[]`, so the UI can mark real-white groups.
-- **Shutdown.** Held per_led: `disable`, `turn_off` (per-LED can't hold; never show the Govee
-  scene unless released). Held groups: **send
+- **Shutdown.** Held per_led: the R10 sequence (dark, `disable`, `turn_off`, park). Per-LED
+  would freeze on its last frame (F16), but a dead service shouldn't leave the strip in razer
+  mode. Held groups: **send
   nothing**; the lights stay (F9). On the next start R3 re-sends the state; frames come before
   `turn_on`, so nothing blinks.
 - **IP change.** Held per_led: `disable` to the old IP. Held groups: nothing to the old IP. Then
@@ -259,25 +265,34 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 - Held groups: nothing is sent. The lights stay until something is picked in the Govee app.
 - Light commands keep being stored. Un-release → R3; our state takes over from any app scene (F11).
 
-### 3.5a Parking (pending probe round 3)
+### 3.5a Parking
 
-The strip's stored group state is what shows when **something else** turns it on (the Govee app,
-govee2mqtt), and possibly what per-LED reverts to after its ~60 s timeout. Parking keeps that
-state deliberate: the lights' **last steady look**, rounded to groups with real white.
+Verified by probe round 3 (results doc). The strip's stored group state is what shows when
+**something else** turns it on (the Govee app, govee2mqtt; round 3 test 1) and what `disable`
+reveals (F16). Parking keeps that state deliberate: the lights' **last steady look**, rounded to
+groups with real white.
 
-- **Park look** = `plan()` over the lights' last on-states (captured when the last visible light
-  turns off; not a fade's black end), with rounding forced (ignores `exact` and overrides).
-- **Turning off** (R10, R11) becomes: `turn_off` → `disable` (if per-LED) → park frames while off.
-  Nothing is visible at any step (F10: frames while off are stored silently). In group mode, the
-  park frames are skipped when the stored state already matches (diffing).
-- **Entering per-LED** from none (R7): park frames for the current plan go first, while the strip
-  is still off, then `turn_on`, `brightness_max`, `enable`. If govee-zones dies while streaming,
-  the timeout reverts to that approximation, if round 3 test 2 confirms it does. It can't be
-  updated while streaming (F14), so it's from the moment per-LED started. Entering per-LED from
-  groups (R8) needs nothing: the stored state is already the current groups.
-- Depends on round 3: test 1 (turn off while per-LED is on, then disable and park, is invisible;
-  outside turn-on shows the park) and test 2 (the timeout reverts to the stored groups). If test 1
-  fails, the order changes; if test 2 fails, entry parking is dropped (turn-off parking stays).
+- **Park look** = `plan()` over the lights' last on-states, captured when the last visible light
+  turns off (not a fade's black end), with rounding forced (ignores `exact` and overrides).
+- **Turning off from groups** (R11): `turn_off`, then the park frames while off (F10: stored
+  silently). Skipped when the stored state already matches.
+- **Turning off from per-LED** (R10), when group control is available:
+  1. `groups_dark`: every group off. Group frames apply over the stream (F14); by now the
+     composite is black (end of a fade-out) or about to be (instant off, which then glides
+     dark), so it's invisible or intended.
+  2. `disable`. The stored groups are dark, so nothing is revealed.
+  3. `turn_off`. Razer is no longer enabled, so it sticks (F15).
+  4. Park frames while off (F10).
+
+  Round 3 test 1 sent `turn_off` while razer was still on: it didn't stick, and the park look
+  showed. That's why `turn_off` now comes after `disable`, with the groups darkened first so
+  the `disable` reveals nothing.
+- When group control isn't available (`groups_off`, `too_many_groups`, `per_led_setting`): no
+  group frames at all. `disable`, `turn_off`, and the old stored state may show for a moment.
+- **No parking on per-LED entry.** It was meant as crash recovery for a reverting stream, but
+  per-LED holds its last frame for ≥ 120 s with no revert (F16). A crash freezes the last
+  frame, which is better than any approximation, and on restart R7 takes over again. Entry
+  parking would also flash the approximation between `turn_on` and `enable`.
 
 ### 3.6 Overrides
 
@@ -321,8 +336,8 @@ groups are always visible.
     the Govee app, and the strip keeps its lights even if govee-zones stops. Switches to per-LED
     control only for single-LED tools like the pixel finder."*
   - **Per-LED only.** *"Always controls single LEDs. Changes are instant, but white is mixed from
-    RGB (slightly off-color), and the strip goes back to its Govee scene about a minute after
-    govee-zones stops."*
+    RGB (slightly off-color), and the strip stays in streaming mode, so the Govee app can't
+    control it until govee-zones releases it."*
 - **Lights that don't line up with groups** (radio, Automatic only):
   - **Round to whole groups** (default). *"Keeps real white and group control. A light's edge
     moves by at most 2 LEDs to the nearest group boundary."*

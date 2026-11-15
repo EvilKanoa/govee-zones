@@ -72,7 +72,7 @@ Answers go to `$DATA_DIR/probe-r2-<time>.json`.
 | 5 | **Switch back** | Warm white → per-LED blue 3 s → back, three ways: A disable then segments; B segments while per-LED is on, 1.5 s, then disable; C both together (all repeatable) | Clean, or what flashed? For B: did it change while per-LED was still on? | Switch order and dwell (A11, A12) |
 | 6 | **Govee app** | You start an app scene, then warm white is sent. Then LAN brightness flips 100 ↔ 50 | Did the scene stop everywhere? Does LAN brightness dim? | A10, A13 |
 
-### 1.3 Round 3: `pnpm cli probe --round 3 --ip <ip>` (parking)
+### 1.3 Round 3: `pnpm cli probe --round 3 --ip <ip>` (parking, done)
 
 Only the first 4 groups (16 LEDs) are used; the rest of the strip stays dark. Colors: green = an
 old stored state, blue = per-LED, warm white = the parked look. Answers go to
@@ -82,6 +82,8 @@ old stored state, blue = per-LED, warm white = the parked look. Answers go to
 |---|---|---|---|---|
 | 1 | **Park** (repeatable) | Groups green → per-LED blue 3 s → `turn off` while per-LED is on → `disable` while off → park warm white while off. Then you turn the strip on from the Govee app (or the probe sends LAN `turn on`) | Blue straight to dark, or a flash of green / warm white? At turn-on: warm white (parked), green, blue, or other? | Whether parking can be invisible, and whether an outside turn-on shows the parked look |
 | 2 | **Timeout revert** (repeatable) | Groups warm white → per-LED blue 3 s → frames stop with no `disable`. You press Enter the moment the LEDs change (up to 120 s; the time is recorded). Then `disable` | What it changed to: stored groups, a Govee scene, off, or nothing? Did `disable` change anything? | Whether parking on per-LED entry gives crash recovery |
+
+Round 3 is done: see the results doc.
 
 ### 1.4 Raw commands: `pnpm cli seg …`
 
@@ -220,10 +222,11 @@ frame / after → held, mode (reason).
 | 9 | want per_led, held none | turn_on, brightness_max, enable | composite | – | per_led / per_led |
 | 10 | want per_led, held groups (fading or not) | enable | composite | – | per_led / per_led |
 | 11 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| 12 | none, held per_led | disable, turn_off | – | – | none / idle |
-| 13 | none, held groups | turn_off | – | – | none / idle |
+| 12 | none, held per_led | groups_dark, disable, turn_off | park | – | none / idle |
+| 13 | none, held groups | turn_off | park (none if it already matches) | – | none / idle |
 | 14 | none, held none | – | – | – | none / idle |
 | 15 | none, held per_led, groups not available | disable, turn_off | – | – | none / idle |
+| 16 | none, held per_led, instant off (no fade) | groups_dark, disable, turn_off | park | – | none / idle (the darkening glides < 0.5 s instead of a hard cut; accepted) |
 
 **Invariant sweeps** over the full cross-product (enabled 2 × released 2 × available 2 × want 3 ×
 held 3 × fading 2 = 144 cases): I1–I6 from plan §3.3.
@@ -238,8 +241,9 @@ The recorder decodes `ptReal` into labels such as `g[0-1]:white:2703`, `g[2-14]:
 | E1 | 3 aligned `ct` lights; turn on A | `bright:100`, group frames (A white, rest off, A's pct), then `turn:1`; mode groups; **no** `enable` |
 | E2 | E1, then 60 s | A full re-send + `bright:100` every 30 s; nothing else |
 | E3 | E1, change A's brightness | Only a brightness frame for A's groups |
-| E4 | E1, all off | `turn:0` only; mode idle; then silence |
-| E5 | All off while per-LED (control = per_led) | `disable`, `turn:0`; then silence |
+| E4 | E1, all off (instant) | `turn:0`, then park frames = the pre-off look; mode idle; then silence |
+| E5 | All off from per-LED with a 1 s fade (exact light) | razer frames to black, then `g[all]:off`, `disable`, `turn:0`, park frames (the look **before** the fade); never `turn:0` before `disable` |
+| E5b | All off while `control = per_led` | `disable`, `turn:0`; no `ptReal` at all |
 | E6 | + `rgb` light partly covering a group, exact; then off with a 1 s fade | `enable` + razer frames; reason exact_leds; razer continues until the fade ends, then `disable` + group frames |
 | E7 | Same as E6 but round | Never `enable`; the light painted on its rounded groups |
 | E8 | Identify in group mode | Group datagrams alternating every 700 ms; never `enable`; back to the plan after 5 s |
@@ -249,7 +253,7 @@ The recorder decodes `ptReal` into labels such as `g[0-1]:white:2703`, `g[2-14]:
 | E12 | 200 LEDs, size 4 | Per-LED; reason too_many_groups |
 | E13 | Release in group mode | No datagrams; commands stored; un-release → full state, then `turn:1` |
 | E14 | `stop()` in group mode | No datagrams |
-| E15 | `stop()` in per-LED mode | `disable`, `turn:0` |
+| E15 | `stop()` in per-LED mode | `g[all]:off`, `disable`, `turn:0`, park |
 | E16 | Restart with a light on | `bright:100`, full group state, `turn:1`; no `turn:0`, no razer |
 | E17 | 1 s fade in group mode | Group datagrams ~100 ms apart (≈ 10), pct monotonic |
 | E18 | 20 commands in 50 ms | ≤ 1 update per 100 ms |
@@ -281,6 +285,7 @@ Run on the house strip after implementation; record pass/fail in the PR.
 | H2 | Dim each from HA, 100 → 1 % | Smooth; others unaffected; 1 % is lit |
 | H3 | HA transition 2 s | Smooth (glide + 10/s steps) |
 | H4 | All off (the strip turns off), then on again | No flash of the old state |
+| H4b | All off from per-LED (exact light), then turn on from the Govee app | Dark the whole way down; the app turn-on shows the parked look |
 | H5 | Restart the container with lights on | **No blink** |
 | H6 | Stop the container for 5 min | Lights stay on |
 | H7 | Pixel finder, then wait | Per-LED (hard cut in), back to Groups cleanly |

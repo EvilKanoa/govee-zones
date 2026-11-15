@@ -158,3 +158,33 @@ File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
 | UI wording | "Groups of 4 LEDs", never "segments", to avoid confusion with the Govee app. |
 
 The plan has been rewritten around these results ([`segment-mode-plan.md`](segment-mode-plan.md) §1 lists them as facts F1–F14).
+
+---
+
+## Round 3: parking (2026-11-15)
+
+File: `data/probe-r3-2026-11-15T20-39-57-991Z.json`. Only the first 4 groups were watched.
+Green = old stored state, blue = per-LED, warm white = parked look.
+
+| Test | Observation | Confidence | Notes |
+|---|---|---|---|
+| 1 Park | Sequence `turn off` (razer still on) → `disable` → park warm white: the strip **glided smoothly to warm white and stayed on** | High (outcome), medium (cause) | **`turn off` while razer is enabled doesn't stick** (F15). Either it's ignored during razer, or `disable` powers the strip back on; the fix is the same. Green (the stored state revealed by `disable`) may have shown for a moment and been lost in the glides |
+| 1 Park | Turn-on (LAN) showed warm white | Low | The strip was already on, so this doesn't test turn-on. Frames-while-off is covered by round 1 (F10) |
+| 2 Revert | Per-LED blue with frames stopped (no `disable`): **stayed blue for the full 120 s** | High | **No revert within 120 s** (F16). CLAUDE.md's "reverts ~60 s after the last frame" doesn't hold on this strip, at least not within 2 minutes |
+| 2 Revert | `disable` at the end → warm white (the stored groups) | High | Agrees with round 2: `disable` reveals the stored group state |
+
+### What changes
+
+- **Turn-off order** (plan §3.5a, R10): darken the groups over the stream → `disable` → `turn_off` →
+  park while off. Built from verified pieces (F14, F15, F10); the full sequence is acceptance
+  check H4b.
+- **No parking on per-LED entry.** Per-LED holds its last frame ≥ 120 s, so a crash freezes the
+  last frame instead of reverting.
+- Per-LED keepalive stays (2 s): cheap, and the real revert time is unknown.
+
+### Still open
+
+| Question | Handling |
+|---|---|
+| Does per-LED revert at all, and after how long? | Not needed for the design. Could be checked with a longer wait (10+ min) if it ever matters |
+| The full R10 turn-off sequence on hardware | Acceptance checks H4b and H5 |

@@ -39,7 +39,7 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 
 - **Compositor** must stay a pure function `(device, lights, states, now) → frame`. It paints lights that are on in ascending `priority` order (ties broken by creation order) over black, applies brightness and in-progress software transitions, then downsamples if `ledCount > maxColorsPerPacket`.
 - **Streamer** sends a frame immediately on change, then on a keepalive tick (default 2 s). During transitions it sends at roughly 20–40 fps. Pace datagrams about 15 ms apart, because the firmware drops back-to-back packets.
-- **Lifecycle state machine** (SPEC §6) is the subtle part. The strip reverts to its Govee app effect about 60 s after the last frame, so the service must never just stop sending while lights are on. It must always exit explicitly (`B1 00`, then follow the per-device `idleBehavior`: `off` | `hold_black` | `release`). "Release to Govee" stops rendering but still stores incoming light commands.
+- **Lifecycle state machine** (SPEC §6) is the subtle part. SPEC says the strip reverts to its Govee app effect about 60 s after the last frame; on the H805A no revert was seen within 120 s (`docs/segment-mode-results.md`, round 3). Either way, the service must never just stop sending while lights are on. It must always exit explicitly (`B1 00`, then follow the per-device `idleBehavior`: `off` | `hold_black` | `release`). "Release to Govee" stops rendering but still stores incoming light commands.
 - Implementation decisions beyond the spec:
   - Fades interpolate per-light opacity rather than fading to black, so a high-priority light fading out reveals the lights underneath.
   - At startup an idle device gets no commands, so a restart doesn't kill a Govee scene.
