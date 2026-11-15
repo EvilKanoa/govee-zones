@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-`SPEC.md` is the design brief. Everything is implemented except Docker packaging. Without `MQTT_HOST`, the service runs with the web UI only. The web UI and the MQTT bridge both send HA JSON-schema `LightCommand`s through `Engine.command`.
+`SPEC.md` is the design brief, and everything in it is implemented. Without `MQTT_HOST`, the service runs with the web UI only. The web UI and the MQTT bridge both send HA JSON-schema `LightCommand`s through `Engine.command`.
 
 ## Commands
 
@@ -15,6 +15,7 @@ Node 22.12+ is required (Volta pins Node 24 in `package.json`); use pnpm.
 - `pnpm test` — Vitest. Single file: `pnpm vitest run test/engine.test.ts`. Single test: add `-t "name"`.
 - `pnpm typecheck` — server (`tsconfig.json`, NodeNext, `.js` import suffixes) and web (`web/tsconfig.json`, bundler resolution).
 - `pnpm build` → `dist/web` + `dist/server`. Run with `node dist/server/server/main.js`.
+- `docker compose up -d --build` — the container (`Dockerfile`: build → prod deps → `node:24-alpine` runtime, healthcheck on `/healthz`). `.github/workflows/docker.yml` tests, then pushes multi-arch images to `ghcr.io/evilkanoa/govee-zones`. The Unraid template is `unraid/govee-zones.xml`.
 - `pnpm cli <enable|disable|on|off|fill|pixel|chase> --ip <ip> -n <count>` — protocol CLI for hardware checks.
 
 ## Layout
@@ -47,6 +48,7 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 
 ## Gotchas
 
+- `pino-pretty` is a devDependency. `main.ts` only loads it when stdout is a TTY and `NODE_ENV` isn't `production` (the image sets it), so `docker run -it` doesn't crash.
 - Zod 4 applies `.default()` inside `.partial()`. Patch schemas (`devicePatch`, `lightPatch`) must come from the default-free base shapes in `schemas.ts`, or a partial update silently resets every field it doesn't mention. `test/schemas.test.ts` guards this.
 
 ## Protocol essentials
@@ -64,8 +66,9 @@ Web UI and MQTT bridge → **State Store** (persisted) → **Compositor** → **
 - `SIMULATE=true` must run the full stack (UI + MQTT) with frames logged instead of sent.
 - HA entities: one HA device per strip, one JSON-schema light per virtual light. Capability per light (`onoff`/`dimmable`/`rgb`/`rgb_ct`) drives the discovery payload. Also add per-device "Release to Govee" switch and `mode` sensor entities. State is retained, and availability uses an LWT. Deleting a light publishes an empty retained discovery payload.
 
-## Remaining work (SPEC §12)
+## Open items
 
-1. A Dockerfile, a compose example with a healthcheck (`/healthz` exists), and an Unraid template.
+- Still unverified on hardware (SPEC §9): whether the strip recovers within the 30 s reassert after a power cycle mid-stream, and whether `00` in the packet header is a length high byte.
+- White balance must be tuned per strip after deployment.
 
 SPEC §10 has a Python reference script confirmed working on the real device.

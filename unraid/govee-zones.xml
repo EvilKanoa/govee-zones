@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>govee-zones</Name>
+  <Repository>ghcr.io/evilkanoa/govee-zones:latest</Repository>
+  <Registry>https://github.com/EvilKanoa/govee-zones/pkgs/container/govee-zones</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/EvilKanoa/govee-zones/issues</Support>
+  <Project>https://github.com/EvilKanoa/govee-zones</Project>
+  <Overview>Split a Govee RGBIC strip into independent virtual lights for Home Assistant (MQTT Discovery), driven locally over the LAN razer/DreamView protocol. Needs only outbound UDP to the strip on port 4003; never binds 4002, so it coexists with govee2mqtt.</Overview>
+  <Category>HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <ExtraParams>--stop-timeout 10</ExtraParams>
+  <Config Name="Web UI port" Target="8080" Default="8737" Mode="tcp" Description="Host port for the web UI and API" Type="Port" Display="always" Required="true" Mask="false">8737</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/govee-zones" Mode="rw" Description="Config, light state and house photos" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/govee-zones</Config>
+  <Config Name="MQTT host" Target="MQTT_HOST" Default="" Mode="" Description="Broker host or URL. Leave empty to run with the web UI only." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="MQTT port" Target="MQTT_PORT" Default="1883" Mode="" Description="Broker port" Type="Variable" Display="always" Required="false" Mask="false">1883</Config>
+  <Config Name="MQTT username" Target="MQTT_USERNAME" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="MQTT password" Target="MQTT_PASSWORD" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Discovery prefix" Target="MQTT_DISCOVERY_PREFIX" Default="homeassistant" Mode="" Description="Home Assistant MQTT discovery prefix" Type="Variable" Display="advanced" Required="false" Mask="false">homeassistant</Config>
+  <Config Name="Base topic" Target="MQTT_BASE_TOPIC" Default="govee-zones" Mode="" Description="Topic root and HA node id. Run one instance per base topic." Type="Variable" Display="advanced" Required="false" Mask="false">govee-zones</Config>
+  <Config Name="Log level" Target="LOG_LEVEL" Default="info" Mode="" Description="trace, debug, info, warn, error" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+  <Config Name="Simulate" Target="SIMULATE" Default="false" Mode="" Description="Log frames instead of sending UDP" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+</Container>

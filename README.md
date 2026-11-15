@@ -2,7 +2,7 @@
 
 Split one Govee RGBIC strip (e.g. H805A Permanent Outdoor Lights Elite) into independent **virtual lights**, controlled fully locally over the LAN "razer"/DreamView streaming protocol. See [`SPEC.md`](SPEC.md) for the full design.
 
-> **Status:** the web UI, compositor, streaming lifecycle, MQTT / Home Assistant bridge and protocol CLI are implemented. Without `MQTT_HOST` the service runs with the web UI only. Docker packaging is not built yet.
+> **Status:** the web UI, compositor, streaming lifecycle, MQTT / Home Assistant bridge, protocol CLI and Docker packaging are implemented. Without `MQTT_HOST` the service runs with the web UI only.
 
 ## Requirements
 
@@ -25,6 +25,66 @@ Production-style:
 pnpm build
 DATA_DIR=./data node dist/server/server/main.js   # UI served on http://localhost:8080
 ```
+
+## Docker
+
+The image is a multi-stage `node:24-alpine` build that serves the UI on container port 8080 and keeps everything in `/data`. The compose example and Unraid template map it to host port **8737**, to avoid the usual 8080 clashes. It includes a healthcheck that polls `/healthz`. Bridge networking is fine: the container only sends UDP to `<strip-ip>:4003` and never binds UDP 4002. No UDP ports need to be published.
+
+```sh
+docker compose up -d --build     # uses docker-compose.yml; edit the MQTT settings first
+# or
+docker build -t govee-zones .
+docker run -d --name govee-zones -p 8737:8080 -v ./data:/data \
+  -e MQTT_HOST=192.168.1.10 -e MQTT_USERNAME=… -e MQTT_PASSWORD=… govee-zones
+```
+
+`docker stop` sends SIGTERM, and the service exits streaming on each strip before stopping. Keep the stop timeout at 10 s or more.
+
+**Published image.** `.github/workflows/docker.yml` runs typecheck and tests, then pushes `ghcr.io/evilkanoa/govee-zones` for amd64 and arm64. It tags `latest` from `main`, plus `vX.Y.Z` tags and `sha-…`. GHCR packages start out private: make the package public (GitHub → Packages → govee-zones → Package settings) or `docker login ghcr.io` on the host before pulling.
+
+### Unraid
+
+The image must be pullable first (see *Published image* above). Give each strip a static DHCP lease, because devices are configured by IP.
+
+**With the template**
+
+1. Copy `unraid/govee-zones.xml` to `/boot/config/plugins/dockerMan/templates-user/` on the server. If the repo is public, this does it:
+   ```sh
+   wget -O /boot/config/plugins/dockerMan/templates-user/my-govee-zones.xml \
+     https://raw.githubusercontent.com/EvilKanoa/govee-zones/main/unraid/govee-zones.xml
+   ```
+2. Go to *Docker → Add Container*, then open the **Template** dropdown and pick **govee-zones** under *User templates*.
+3. Fill in the MQTT host, username and password. The port (8737) and appdata path (`/mnt/user/appdata/govee-zones`) are prefilled. The discovery prefix, base topic, log level and simulate options are under *Show more settings*.
+4. *Apply*. The web UI is at `http://<unraid-ip>:8737`. The container's WebUI menu entry links there too.
+
+**Without the template**
+
+Go to *Docker → Add Container* and fill in the fields by hand:
+
+| Field | Value |
+|---|---|
+| Name | `govee-zones` |
+| Repository | `ghcr.io/evilkanoa/govee-zones:latest` |
+| Network Type | `bridge` |
+| WebUI | `http://[IP]:[PORT:8080]/` |
+| Extra Parameters | `--stop-timeout 10` (time to exit streaming cleanly) |
+
+Then use *Add another Path, Port, Variable, Label or Device* for each of these:
+
+| Config type | Name | Container side | Host side / value |
+|---|---|---|---|
+| Port (TCP) | Web UI | `8080` | `8737` |
+| Path (read/write) | Data | `/data` | `/mnt/user/appdata/govee-zones` |
+| Variable | MQTT host | `MQTT_HOST` | your broker's IP or hostname |
+| Variable | MQTT port | `MQTT_PORT` | `1883` |
+| Variable | MQTT username | `MQTT_USERNAME` | (if your broker needs one) |
+| Variable | MQTT password | `MQTT_PASSWORD` | (if your broker needs one) |
+
+`MQTT_DISCOVERY_PREFIX`, `MQTT_BASE_TOPIC`, `LOG_LEVEL` and `SIMULATE` are optional. The defaults are in the Environment table below. *Apply*, then open `http://<unraid-ip>:8737`. You can also run `docker run` from the Unraid terminal (see above), but the container then won't appear as editable in the Docker tab.
+
+### Moving from a local dev instance
+
+Use *Export* in the web UI of the instance you've been testing, then *Import* into the container. IDs are preserved, so the HA entities carry over. Stop the dev instance first if it uses the same `MQTT_BASE_TOPIC`. House photos aren't included in the export. Copy `data/backgrounds/*.jpg` into the appdata `backgrounds/` folder if you want them.
 
 ### Environment
 

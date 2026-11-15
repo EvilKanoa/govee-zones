@@ -1,0 +1,28 @@
+# Example: copy, adjust the MQTT settings, then `docker compose up -d --build`.
+services:
+  govee-zones:
+    build: .
+    # image: ghcr.io/<you>/govee-zones:latest   # if you publish an image instead
+    container_name: govee-zones
+    restart: unless-stopped
+    ports:
+      - "8737:8080" # web UI on host port 8737
+    environment:
+      MQTT_HOST: 192.168.1.10
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_DISCOVERY_PREFIX: homeassistant
+      MQTT_BASE_TOPIC: govee-zones
+      LOG_LEVEL: info
+      # SIMULATE: "true"   # log frames instead of sending UDP
+    volumes:
+      - ./data:/data
+    # Allow time for the explicit "exit streaming" datagrams on shutdown.
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

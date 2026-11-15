@@ -11,7 +11,11 @@ import { simulatedTransport, udpTransport } from './transport.js';
 const config = loadConfig();
 const log = pino({
   level: config.logLevel,
-  transport: process.stdout.isTTY ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss' } } : undefined,
+  // Pretty logs only in local dev: pino-pretty is a devDependency and isn't in the image.
+  transport:
+    process.stdout.isTTY && process.env.NODE_ENV !== 'production'
+      ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss' } }
+      : undefined,
 });
 
 const store = new Store(config.dataDir);
