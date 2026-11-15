@@ -1,17 +1,13 @@
 // Apply HA JSON-schema light commands to light state. Shared by web UI and MQTT.
-import { miredsToRgb } from '../shared/color.js';
-import type { LightCommand, LightState, RGB, VirtualLight } from '../shared/types.js';
+import { clampMireds } from '../shared/color.js';
+import type { LightCommand, LightState, Look, VirtualLight } from '../shared/types.js';
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(n)));
 
+export const cloneLook = (l: Look): Look => (l.kind === 'rgb' ? { kind: 'rgb', color: [...l.color] } : { ...l });
+
 export function defaultState(light: VirtualLight): LightState {
-  const d = light.defaults;
-  const s: LightState = { on: false, brightness: d.brightness, color: [...d.color] as RGB };
-  if (light.capability === 'rgb_ct' && d.colorTemp) {
-    s.colorTemp = d.colorTemp;
-    s.color = miredsToRgb(d.colorTemp);
-  }
-  return s;
+  return { on: false, brightness: light.defaults.brightness, look: cloneLook(light.defaults.look) };
 }
 
 /**
@@ -25,18 +21,12 @@ export function applyCommand(light: VirtualLight, prev: LightState, cmd: LightCo
   // A command without `state` only changes attributes; it never turns the light on.
   const turningOn = cmd.state === 'ON' && !prev.on;
   const base = turningOn ? defaultState(light) : prev;
-  const next: LightState = { ...base, color: [...base.color] as RGB, on: prev.on || turningOn };
+  const next: LightState = { ...base, look: cloneLook(base.look), on: prev.on || turningOn };
 
   const cap = light.capability;
   if (cap !== 'onoff' && cmd.brightness !== undefined) next.brightness = clamp(cmd.brightness, 0, 255);
-  if ((cap === 'rgb' || cap === 'rgb_ct') && cmd.color) {
-    next.color = [clamp(cmd.color.r, 0, 255), clamp(cmd.color.g, 0, 255), clamp(cmd.color.b, 0, 255)];
-    delete next.colorTemp;
-  }
-  if (cap === 'rgb_ct' && cmd.color_temp !== undefined) {
-    next.colorTemp = clamp(cmd.color_temp, 153, 500);
-    next.color = miredsToRgb(next.colorTemp);
-  }
+  if (cap === 'rgb' && cmd.color) next.look = { kind: 'rgb', color: [clamp(cmd.color.r, 0, 255), clamp(cmd.color.g, 0, 255), clamp(cmd.color.b, 0, 255)] };
+  if (cap === 'ct' && cmd.color_temp !== undefined) next.look = { kind: 'white', mireds: clampMireds(cmd.color_temp) };
   return next;
 }
 

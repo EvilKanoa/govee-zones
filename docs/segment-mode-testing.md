@@ -146,8 +146,8 @@ marked *(new)*. F-numbers refer to the verified facts in the plan's §1.
 | `[56,59]` | `14` | Last group |
 | `[]` | none | |
 
-Plus: every edge moves by ≤ 2 LEDs over all ranges `[a,b]` with 0 ≤ a ≤ b < 60 (an exhaustive
-sweep). `isAligned`: true for `[4,11]`, false for `[4,10]`.
+Plus an exhaustive sweep over all ranges `[a,b]` with 0 ≤ a ≤ b < 60: no light disappears, and
+every edge moves ≤ 2 LEDs unless the light half-covers no group (tiny lights snap onto one group). `isAligned`: true for `[4,11]`, false for `[4,10]`.
 
 ### 2.3 `test/plan.test.ts` *(new)*: control decision and group looks
 

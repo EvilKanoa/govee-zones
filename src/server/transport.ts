@@ -81,7 +81,9 @@ export function udpTransport(): Transport {
 export function simulatedTransport(log: Logger): Transport {
   return new PacedTransport(async (ip, payload) => {
     const msg = JSON.parse(payload.toString()).msg;
-    if (msg.cmd === 'razer') {
+    if (msg.cmd === 'ptReal') {
+      log.info({ ip }, `[sim] groups ${(msg.data.command as string[]).map((b) => describeSegmentFrame(Buffer.from(b, 'base64'))).join(' · ')}`);
+    } else if (msg.cmd === 'razer') {
       const pt = Buffer.from(msg.data.pt, 'base64');
       if (pt[3] === 0xb1) log.info({ ip }, `[sim] razer ${pt[4] ? 'enable' : 'disable'}`);
       else log.debug({ ip, colors: pt[5] }, '[sim] razer frame');
@@ -89,4 +91,25 @@ export function simulatedTransport(log: Logger): Transport {
       log.info({ ip, data: msg.data }, `[sim] ${msg.cmd}`);
     }
   });
+}
+
+/** Human-readable segment frame for simulate logs; groups count from 1, as in the UI. */
+export function describeSegmentFrame(f: Buffer): string {
+  const brightness = f[3] === 0x02;
+  const maskStart = brightness ? 5 : 12; // after `33 05 15 02 <pct>` or `33 05 15 01 RGB KK KK TINT`
+  const groups: number[] = [];
+  for (let byte = 0; byte < 3; byte++) for (let bit = 0; bit < 8; bit++) if (f[maskStart + byte] & (1 << bit)) groups.push(byte * 8 + bit + 1);
+  const spans: string[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    let j = i;
+    while (j + 1 < groups.length && groups[j + 1] === groups[j] + 1) j++;
+    spans.push(i === j ? `${groups[i]}` : `${groups[i]}-${groups[j]}`);
+    i = j;
+  }
+  const where = spans.join(',') || 'none';
+  if (brightness) return `${where} ${f[4]}%`;
+  const kelvin = (f[7] << 8) | f[8];
+  if (kelvin) return `${where} white ${kelvin}K`;
+  if (!f[4] && !f[5] && !f[6]) return `${where} off`;
+  return `${where} rgb #${f.subarray(4, 7).toString('hex')}`;
 }

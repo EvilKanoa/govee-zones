@@ -41,7 +41,7 @@ let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
-  log.info({ signal }, 'shutting down: applying idle behavior');
+  log.info({ signal }, 'shutting down (group mode leaves the lights as they are)');
   await engine.stop();
   await mqtt?.close();
   store.flush();

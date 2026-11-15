@@ -3,24 +3,27 @@ import {
   applyWhiteBalance,
   composite,
   downsample,
-  lookAt,
+  lerpLook,
+  paintAt,
   startTransition,
-  targetLook,
+  visualAt,
   type RenderState,
+  type Visual,
 } from '../src/server/compositor.js';
-import type { Device, VirtualLight } from '../src/shared/types.js';
+import type { Device, LightState, Look, VirtualLight } from '../src/shared/types.js';
 
 const device: Device = {
   id: 'd', name: 'strip', ip: '1.2.3.4', ledCount: 10, maxColorsPerPacket: 84,
-  keepaliveMs: 2000, enabled: true, idleBehavior: 'off',
+  keepaliveMs: 2000, enabled: true, groupSize: 0, control: 'auto', partialGroups: 'round',
 };
 
 let order = 0;
 const light = (id: string, ranges: [number, number][], priority = 0): VirtualLight => ({
   id, name: id, deviceId: 'd', ranges, priority, capability: 'rgb',
-  defaults: { color: [255, 255, 255], brightness: 255 }, transitionMs: 0, order: order++,
+  defaults: { brightness: 255, look: { kind: 'rgb', color: [255, 255, 255] } }, transitionMs: 0, order: order++,
 });
-const on = (color: [number, number, number], brightness = 255): RenderState => ({ on: true, brightness, color });
+const on = (color: [number, number, number], brightness = 255): RenderState => ({ on: true, brightness, look: { kind: 'rgb', color } });
+const vis = (color: [number, number, number], alpha: number): Visual => ({ look: { kind: 'rgb', color }, brightness: 255, alpha });
 const px = (f: Uint8Array, i: number) => [f[i * 3], f[i * 3 + 1], f[i * 3 + 2]];
 
 describe('composite', () => {
@@ -76,30 +79,50 @@ describe('composite', () => {
 describe('transitions', () => {
   it('fades in from invisible at the target color', () => {
     const next = on([200, 0, 0]);
-    const t = startTransition({ color: [0, 0, 0], alpha: 0 }, next, 1000, 0)!;
-    expect(lookAt({ ...next, transition: t }, 0)).toEqual({ color: [200, 0, 0], alpha: 0 });
-    expect(lookAt({ ...next, transition: t }, 500).alpha).toBeCloseTo(0.5);
-    expect(lookAt({ ...next, transition: t }, 1000)).toEqual(targetLook(next));
+    const t = startTransition(vis([0, 0, 0], 0), next, 1000, 0)!;
+    expect(paintAt({ ...next, transition: t }, 0)).toEqual({ color: [200, 0, 0], alpha: 0 });
+    expect(paintAt({ ...next, transition: t }, 500).alpha).toBeCloseTo(0.5);
+    expect(paintAt({ ...next, transition: t }, 1000)).toEqual(paintAt(next, 1000));
   });
 
   it('interpolates color between two on states', () => {
     const next = on([0, 0, 200]);
-    const t = startTransition({ color: [200, 0, 0], alpha: 1 }, next, 1000, 0)!;
-    expect(lookAt({ ...next, transition: t }, 500)).toEqual({ color: [100, 0, 100], alpha: 1 });
+    const t = startTransition(vis([200, 0, 0], 1), next, 1000, 0)!;
+    expect(paintAt({ ...next, transition: t }, 500)).toEqual({ color: [100, 0, 100], alpha: 1 });
   });
 
   it('fades out holding the current color, revealing lights underneath', () => {
     const top = light('top', [[0, 0]], 1);
     const base = light('base', [[0, 0]], 0);
     const off = { ...on([200, 200, 200]), on: false };
-    const t = startTransition({ color: [200, 200, 200], alpha: 1 }, off, 1000, 0)!;
+    const t = startTransition(vis([200, 200, 200], 1), off, 1000, 0)!;
     const states = { top: { ...off, transition: t }, base: on([0, 0, 100]) };
     expect(px(composite(device, [top, base], states, 500), 0)).toEqual([100, 100, 150]);
     expect(px(composite(device, [top, base], states, 1000), 0)).toEqual([0, 0, 100]);
   });
 
   it('returns no transition for zero duration', () => {
-    expect(startTransition({ color: [0, 0, 0], alpha: 0 }, on([1, 1, 1]), 0, 0)).toBeUndefined();
+    expect(startTransition(vis([0, 0, 0], 0), on([1, 1, 1]), 0, 0)).toBeUndefined();
+  });
+
+  it('keeps white as white for group control: mireds and brightness interpolate', () => {
+    const next: LightState = { on: true, brightness: 51, look: { kind: 'white', mireds: 154 } };
+    const from: Visual = { look: { kind: 'white', mireds: 370 }, brightness: 255, alpha: 1 };
+    const t = startTransition(from, next, 1000, 0)!;
+    expect(visualAt({ ...next, transition: t }, 500)).toEqual({ look: { kind: 'white', mireds: 262 }, brightness: 153, alpha: 1 });
+  });
+
+  it('swaps RGB ↔ white at the midpoint in group looks, but blends RGB smoothly per-LED', () => {
+    const red: Look = { kind: 'rgb', color: [255, 0, 0] };
+    const white: Look = { kind: 'white', mireds: 370 };
+    expect(lerpLook(red, white, 0.49)).toBe(red);
+    expect(lerpLook(red, white, 0.5)).toBe(white);
+    const next = { on: true, brightness: 255, look: white };
+    const t = startTransition({ look: red, brightness: 255, alpha: 1 }, next, 1000, 0)!;
+    const mid = paintAt({ ...next, transition: t }, 500).color;
+    expect(mid[0]).toBe(255);
+    expect(mid[1]).toBeGreaterThan(0); // partway to the warm white's green
+    expect(mid[1]).toBeLessThan(167);
   });
 });
 

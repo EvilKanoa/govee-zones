@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import type { Logger } from 'pino';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
+import { MAX_KELVIN, MIN_KELVIN } from '../shared/color.js';
 import type { AppSnapshot, ServerMessage } from '../shared/types.js';
 import type { Engine } from './engine.js';
 import type { MqttBridge } from './mqtt.js';
@@ -87,8 +88,10 @@ export async function createServer(opts: {
     return { ok: true };
   });
   app.post<{ Params: { id: string } }>('/api/devices/:id/test-white', async (req) => {
-    const { kelvin } = z.object({ kelvin: z.number().min(2000).max(6500).optional() }).parse(req.body ?? {});
-    engine.testWhite(req.params.id, kelvin);
+    const { kelvin, kind } = z
+      .object({ kelvin: z.number().min(MIN_KELVIN).max(MAX_KELVIN).optional(), kind: z.enum(['mixed', 'real']).optional() })
+      .parse(req.body ?? {});
+    engine.testWhite(req.params.id, kelvin, kind);
     return { ok: true };
   });
   app.post<{ Params: { id: string } }>('/api/devices/:id/stop-override', async (req) => {
@@ -169,7 +172,7 @@ export async function createServer(opts: {
   opts.mqtt?.on('status', pushSnapshot);
 
   const lastPreview = new Map<string, number>();
-  engine.on('frame', (deviceId, pixels) => {
+  engine.on('frame', (deviceId, pixels, realWhite) => {
     const now = Date.now();
     if (now - (lastPreview.get(deviceId) ?? 0) < PREVIEW_INTERVAL_MS) return;
     lastPreview.set(deviceId, now);
@@ -178,6 +181,7 @@ export async function createServer(opts: {
       deviceId,
       pixels: Buffer.from(pixels).toString('base64'),
       mode: engine.status(deviceId).mode,
+      realWhite,
     });
   });
 

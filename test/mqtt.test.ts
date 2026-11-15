@@ -7,35 +7,37 @@ import { Engine } from '../src/server/engine.js';
 import { MqttBridge, discoveryFor, parseCommand, statePayload, topics } from '../src/server/mqtt.js';
 import { Store } from '../src/server/store.js';
 import type { Transport } from '../src/server/transport.js';
-import type { Device, VirtualLight } from '../src/shared/types.js';
+import type { Device, LightState, VirtualLight } from '../src/shared/types.js';
 
 const t = topics('homeassistant', 'govee-zones');
 const device: Device = {
   id: 'dev1', name: 'Eaves', ip: '1.2.3.4', ledCount: 60, maxColorsPerPacket: 84, keepaliveMs: 2000,
-  enabled: true, idleBehavior: 'off',
+  enabled: true, groupSize: 4, control: 'auto', partialGroups: 'round',
 };
 const light = (capability: VirtualLight['capability']): VirtualLight => ({
   id: 'l1', name: 'Front', deviceId: 'dev1', ranges: [[0, 9]], priority: 0, capability,
-  defaults: { color: [255, 255, 255], brightness: 255 }, transitionMs: 0, order: 0,
+  defaults: { brightness: 255, look: capability === 'rgb' ? { kind: 'rgb', color: [255, 255, 255] } : { kind: 'white', mireds: 370 } },
+  transitionMs: 0, order: 0,
 });
+const DEV: Omit<Device, 'id'> = { name: 'Eaves', ip: '1.2.3.4', ledCount: 60, maxColorsPerPacket: 84, keepaliveMs: 2000, enabled: true, groupSize: 4, control: 'auto', partialGroups: 'round' };
 
 describe('discoveryFor', () => {
   it('maps capability to supported_color_modes', () => {
     const modes = (c: VirtualLight['capability']) =>
       (discoveryFor(t, device, [light(c)]).get(t.discovery('light', 'l1')) as { supported_color_modes: string[] }).supported_color_modes;
     expect(modes('onoff')).toEqual(['onoff']);
-    expect(modes('dimmable')).toEqual(['brightness']);
     expect(modes('rgb')).toEqual(['rgb']);
-    expect(modes('rgb_ct')).toEqual(['rgb', 'color_temp']);
+    expect(modes('ct')).toEqual(['color_temp']);
   });
 
   it('uses kelvin for color temperature and groups everything under one HA device', () => {
-    const d = discoveryFor(t, device, [light('rgb_ct')]);
+    const d = discoveryFor(t, device, [light('ct')]);
     expect(d.get('homeassistant/light/govee-zones/l1/config')).toMatchObject({
-      schema: 'json', unique_id: 'govee-zones_l1', color_temp_kelvin: true, min_kelvin: 2000, max_kelvin: 6535,
+      schema: 'json', unique_id: 'govee-zones_l1', brightness: true, color_temp_kelvin: true, min_kelvin: 2700, max_kelvin: 6500,
       command_topic: 'govee-zones/light/l1/set', availability_topic: 'govee-zones/status',
       device: { identifiers: ['govee-zones_dev1'], name: 'Eaves' },
     });
+    expect(d.get('homeassistant/sensor/govee-zones/dev1_mode/config')).toMatchObject({ options: ['groups', 'per_led', 'idle', 'released', 'error'] });
     expect([...d.keys()]).toEqual([
       'homeassistant/light/govee-zones/l1/config',
       'homeassistant/switch/govee-zones/dev1_release/config',
@@ -46,11 +48,11 @@ describe('discoveryFor', () => {
 
 describe('statePayload / parseCommand', () => {
   it('reports the color mode the light is in', () => {
-    const s = { on: true, brightness: 128, color: [255, 0, 0] as [number, number, number] };
-    expect(statePayload(light('onoff'), s)).toEqual({ state: 'ON', color_mode: 'onoff' });
-    expect(statePayload(light('dimmable'), s)).toEqual({ state: 'ON', color_mode: 'brightness', brightness: 128 });
-    expect(statePayload(light('rgb_ct'), s)).toMatchObject({ color_mode: 'rgb', color: { r: 255, g: 0, b: 0 } });
-    expect(statePayload(light('rgb_ct'), { ...s, colorTemp: 370 })).toMatchObject({ color_mode: 'color_temp', color_temp: 2703 });
+    const red: LightState = { on: true, brightness: 128, look: { kind: 'rgb', color: [255, 0, 0] } };
+    const warm: LightState = { on: true, brightness: 128, look: { kind: 'white', mireds: 370 } };
+    expect(statePayload(light('onoff'), warm)).toEqual({ state: 'ON', color_mode: 'onoff' });
+    expect(statePayload(light('rgb'), red)).toEqual({ state: 'ON', color_mode: 'rgb', brightness: 128, color: { r: 255, g: 0, b: 0 } });
+    expect(statePayload(light('ct'), warm)).toEqual({ state: 'ON', color_mode: 'color_temp', brightness: 128, color_temp: 2703 });
   });
 
   it('converts HA kelvin to mireds and rejects junk', () => {
@@ -114,8 +116,8 @@ describe('MqttBridge (integration)', () => {
   const json = (topic: string) => JSON.parse(seen.get(topic) ?? 'null');
 
   it('announces discovery, retained state and availability on connect', async () => {
-    const d = store.addDevice({ name: 'Eaves', ip: '1.2.3.4', ledCount: 60, maxColorsPerPacket: 84, keepaliveMs: 2000, enabled: true, idleBehavior: 'off' });
-    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'rgb', defaults: { color: [255, 0, 0], brightness: 255 }, transitionMs: 0 });
+    const d = store.addDevice(DEV);
+    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'rgb', defaults: { brightness: 255, look: { kind: 'rgb', color: [255, 0, 0] } }, transitionMs: 0 });
     await start();
     await until(() => seen.has(t.deviceStatus(d.id)));
     expect(json(t.discovery('light', l.id))).toMatchObject({ name: 'Front', schema: 'json' });
@@ -133,14 +135,15 @@ describe('MqttBridge (integration)', () => {
   });
 
   it('applies light commands and echoes state', async () => {
-    const d = store.addDevice({ name: 'Eaves', ip: '1.2.3.4', ledCount: 60, maxColorsPerPacket: 84, keepaliveMs: 2000, enabled: true, idleBehavior: 'off' });
-    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'rgb_ct', defaults: { color: [255, 0, 0], brightness: 255 }, transitionMs: 0 });
+    const d = store.addDevice(DEV);
+    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'ct', defaults: { brightness: 255, look: { kind: 'white', mireds: 250 } }, transitionMs: 0 });
     await start();
     await observer.publishAsync(t.lightSet(l.id), JSON.stringify({ state: 'ON', color_temp: 2700, brightness: 100 }));
     await until(() => json(t.lightState(l.id))?.state === 'ON');
-    expect(store.state(l.id)).toMatchObject({ on: true, brightness: 100, colorTemp: 370 });
+    expect(store.state(l.id)).toMatchObject({ on: true, brightness: 100, look: { kind: 'white', mireds: 370 } });
     expect(json(t.lightState(l.id))).toMatchObject({ color_mode: 'color_temp', color_temp: 2703, brightness: 100 });
-    await until(() => json(t.deviceStatus(d.id))?.mode === 'streaming');
+    await until(() => json(t.deviceStatus(d.id))?.mode === 'groups');
+    expect(json(t.deviceStatus(d.id))).toEqual({ mode: 'groups', reason: 'auto', detail: null, error: null, groups: 15 });
 
     await observer.publishAsync(t.lightSet(l.id), 'garbage'); // ignored, no crash
     await observer.publishAsync(t.releaseSet(d.id), 'ON');
@@ -151,8 +154,8 @@ describe('MqttBridge (integration)', () => {
 
   it('clears discovery for deleted lights, and stale configs from earlier runs', async () => {
     await observer.publishAsync(t.discovery('light', 'ghost'), '{"name":"old"}', { retain: true });
-    const d = store.addDevice({ name: 'Eaves', ip: '1.2.3.4', ledCount: 60, maxColorsPerPacket: 84, keepaliveMs: 2000, enabled: true, idleBehavior: 'off' });
-    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'rgb', defaults: { color: [255, 0, 0], brightness: 255 }, transitionMs: 0 });
+    const d = store.addDevice(DEV);
+    const l = store.addLight({ name: 'Front', deviceId: d.id, ranges: [[0, 9]], priority: 0, capability: 'rgb', defaults: { brightness: 255, look: { kind: 'rgb', color: [255, 0, 0] } }, transitionMs: 0 });
     await start();
     await until(() => seen.get(t.discovery('light', 'ghost')) === '');
 

@@ -152,8 +152,9 @@ interface DeviceStatus {
 - `coverage(ranges, ledCount, groupSize)`: per group, how many of its LEDs a light covers.
 - `roundToGroups(ranges, …)`: a group belongs to the light when it covers ≥ 50 % of the group's
   LEDs (2 of 4 counts). If that leaves no group but the light covers at least one LED, it gets the
-  group it covers most (ties → lowest index). Rounding never makes a light disappear, and
-  moves an edge by at most 2 LEDs.
+  group it covers most (ties → lowest index). Rounding never makes a light disappear. It moves
+  an edge by at most 2 LEDs, except for tiny lights (under half a group on each side of a
+  boundary, e.g. LEDs 3–4), which snap onto one group.
 - `isAligned(ranges, …)`: every group is covered 0 % or 100 %.
 
 ### 3.2 Planner (`src/server/plan.ts`, pure)
@@ -339,8 +340,8 @@ groups are always visible.
     RGB (slightly off-color), and if govee-zones stops, the strip freezes on its last frame
     in streaming mode."*
 - **Lights that don't line up with groups** (radio, Automatic only):
-  - **Round to whole groups** (default). *"Keeps real white and group control. A light's edge
-    moves by at most 2 LEDs to the nearest group boundary."*
+  - **Round to whole groups** (default). *"Keeps real white and group control. A light's edges
+    move to the nearest group boundary (at most 2 LEDs)."*
   - **Use exact LEDs.** *"Keeps exact LED ranges by switching the whole strip to per-LED control
     while such a light is on. Other lights lose real white during that time."*
 - The "When all lights are off" setting is gone. The device card says instead: *"The strip turns
