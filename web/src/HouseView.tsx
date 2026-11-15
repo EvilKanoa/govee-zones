@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUT_WIDTH, ledPositions, type Layout, type LayoutPoint } from '../../src/shared/layout';
 import { api } from './api';
 import { ConfirmDelete } from './DevicesPage';
+import { ownersTitle, roundingAt } from './control';
 import { tagColor } from './ranges';
 import { livePx, type ViewProps } from './StripPage';
 
@@ -30,7 +31,7 @@ async function prepPhoto(file: File): Promise<{ blob: Blob; aspect: number }> {
   return { blob, aspect: bmp.height / bmp.width };
 }
 
-export function HouseView({ device, coverage, frame, boundaries, groupsActive, selection, tool, onSelect, onPixel, run }: ViewProps) {
+export function HouseView({ device, coverage, rounded, frame, boundaries, groupsActive, selection, tool, onSelect, onPixel, run }: ViewProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [layout, setLayout] = useState<Layout>(device.layout ?? emptyLayout);
@@ -238,7 +239,17 @@ export function HouseView({ device, coverage, frame, boundaries, groupsActive, s
         {positions.map((q, i) => {
           if (!q) return null;
           const covering = coverage[i];
-          const top = covering[covering.length - 1];
+          // With rounding, the ring shows what group control lights; added LEDs get dots, dropped ones a faint dashed ring.
+          const owners = rounded ? rounded[i] : covering;
+          const { added, dropped } = rounded ? roundingAt(covering, rounded[i]) : { added: [], dropped: [] };
+          const outOnly = owners.length === 0 && dropped.length > 0;
+          const top = outOnly ? dropped[dropped.length - 1] : owners[owners.length - 1];
+          const strokeW = Math.max(1.5 * unitsPerPx, ledR * 0.35);
+          const dash =
+            added.length ? `${strokeW * 0.6} ${strokeW * 0.9}`
+            : outOnly ? `${ledR * 0.35} ${ledR * 0.35}`
+            : owners.length > 1 ? `${ledR * 0.6} ${ledR * 0.4}`
+            : undefined;
           const selected = selection.has(i) || brush?.has(i);
           return (
             <g key={i}>
@@ -249,10 +260,12 @@ export function HouseView({ device, coverage, frame, boundaries, groupsActive, s
                 r={ledR}
                 fill={livePx(frame, i)}
                 stroke={top ? tagColor(top) : 'rgb(255 255 255 / 0.25)'}
-                strokeWidth={Math.max(1.5 * unitsPerPx, ledR * 0.35)}
-                strokeDasharray={covering.length > 1 ? `${ledR * 0.6} ${ledR * 0.4}` : undefined}
+                strokeOpacity={outOnly ? 0.55 : 1}
+                strokeWidth={strokeW}
+                strokeDasharray={dash}
+                strokeLinecap={added.length ? 'round' : undefined}
               >
-                <title>{`LED ${i}${covering.length ? ' · ' + covering.map((l) => l.name).join(' < ') : ''}`}</title>
+                <title>{`LED ${i}${ownersTitle(covering, rounded?.[i])}`}</title>
               </circle>
               {i % 10 === 0 && (
                 <text x={q.x} y={q.y - ledR - 4 * unitsPerPx} className="led-index" fontSize={10 * unitsPerPx}>

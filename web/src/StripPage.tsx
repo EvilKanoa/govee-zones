@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AppSnapshot, Device, DeviceStatus, VirtualLight } from '../../src/shared/types';
 import { api } from './api';
 import type { Run } from './App';
-import { boundarySet, groupsUsable, hasGroups, MODE_LABEL, modeExplanation, snapSelection } from './control';
+import { boundarySet, groupsUsable, hasGroups, MODE_LABEL, modeExplanation, ownersTitle, roundedCoverage, roundingActive, roundingAt, snapSelection } from './control';
 import { HouseView } from './HouseView';
 import { LightsList } from './LightsList';
 import { WhiteBalance } from './WhiteBalance';
@@ -26,6 +26,8 @@ export type Tool = 'select' | 'finder' | 'outline';
 export interface ViewProps {
   device: Device;
   coverage: Coverage;
+  /** Per LED, the lights that cover it after rounding to groups; set only when rounding applies. */
+  rounded?: Coverage;
   frame?: Uint8Array;
   /** LED indices where a new group starts: drawn as dividers in both views. */
   boundaries: Set<number>;
@@ -89,6 +91,21 @@ export function StripPage({ device, snapshot, frame, realWhite, run }: Props) {
     return byLed;
   }, [lights, device.ledCount]);
   const overlapCount = coverage.filter((c) => c.length > 1).length;
+  const rounded = useMemo(
+    () => (roundingActive(device) ? roundedCoverage(coverage, lights, device) : undefined),
+    [coverage, lights, device.ledCount, device.groupSize, device.control, device.partialGroups],
+  );
+  /** LEDs whose owners change with rounding: drives the legend. */
+  const roundingChanges = useMemo(() => {
+    if (!rounded) return { added: 0, dropped: 0 };
+    let added = 0, dropped = 0;
+    coverage.forEach((c, i) => {
+      const r = roundingAt(c, rounded[i]);
+      if (r.added.length) added++;
+      if (r.dropped.length) dropped++;
+    });
+    return { added, dropped };
+  }, [coverage, rounded]);
 
   useEffect(() => {
     if (!lights.some((l) => l.id === target)) setTarget(lights[0]?.id ?? '');
@@ -145,6 +162,7 @@ export function StripPage({ device, snapshot, frame, realWhite, run }: Props) {
   const viewProps: ViewProps = {
     device,
     coverage,
+    rounded,
     frame,
     boundaries,
     groupsActive: status?.mode === 'groups',
@@ -246,6 +264,22 @@ export function StripPage({ device, snapshot, frame, realWhite, run }: Props) {
       )}
 
       {view === 'strip' ? <StripView {...viewProps} /> : <HouseView {...viewProps} />}
+      {(roundingChanges.added > 0 || roundingChanges.dropped > 0) && tool !== 'outline' && (
+        <p className="muted small rounding-legend">
+          Rounding to groups of {device.groupSize}: the {view === 'strip' ? 'bar under each LED' : 'ring around each LED'} shows
+          what group control lights.{' '}
+          {roundingChanges.added > 0 && (
+            <span>
+              <span className={`legend-swatch added ${view}`} /> added by rounding ({roundingChanges.added} LED{roundingChanges.added > 1 ? 's' : ''}){' '}
+            </span>
+          )}
+          {roundingChanges.dropped > 0 && (
+            <span>
+              <span className={`legend-swatch dropped ${view}`} /> dropped by rounding ({roundingChanges.dropped} LED{roundingChanges.dropped > 1 ? 's' : ''})
+            </span>
+          )}
+        </p>
+      )}
 
       {selection.size > 0 && tool === 'select' && (
         <div className="selection-bar">
@@ -295,7 +329,7 @@ export function tagFill(covering: VirtualLight[]): string {
 export const livePx = (frame: Uint8Array | undefined, i: number) =>
   frame ? `rgb(${frame[i * 3]}, ${frame[i * 3 + 1]}, ${frame[i * 3 + 2]})` : '#000';
 
-function StripView({ coverage, frame, boundaries, groupsActive, realWhiteLeds, selection, tool, onSelect, onPixel }: ViewProps) {
+function StripView({ coverage, rounded, frame, boundaries, groupsActive, realWhiteLeds, selection, tool, onSelect, onPixel }: ViewProps) {
   const [drag, setDrag] = useState<{ anchor: number; current: number } | null>(null);
 
   const span = (d: { anchor: number; current: number }) => {
@@ -337,10 +371,14 @@ function StripView({ coverage, frame, boundaries, groupsActive, realWhiteLeds, s
         const selected = selection.has(i) || (!!drag && span(drag).has(i));
         let group = 0;
         for (const b of boundaries) if (b <= i) group++;
+        const owners = rounded ? rounded[i] : covering;
+        const { added, dropped } = rounded ? roundingAt(covering, rounded[i]) : { added: [], dropped: [] };
         const cls = [
           'cell',
+          added.length > 0 && 'rounded-in',
+          dropped.length > 0 && owners.length === 0 && 'rounded-out',
           selected && 'selected',
-          covering.length > 1 && 'overlap',
+          owners.length > 1 && 'overlap',
           tool === 'finder' && 'finder',
           boundaries.has(i) && 'group-start',
           boundaries.size > 0 && group % 2 === 1 && 'band',
@@ -351,10 +389,17 @@ function StripView({ coverage, frame, boundaries, groupsActive, realWhiteLeds, s
             key={i}
             data-led={i}
             className={cls}
-            title={`LED ${i}${boundaries.size ? ` · group ${group + 1}` : ''}${covering.length ? ' · ' + covering.map((l) => l.name).join(' < ') : ''}`}
+            title={`LED ${i}${boundaries.size ? ` · group ${group + 1}` : ''}${ownersTitle(covering, rounded?.[i])}`}
           >
             <div className="cell-live" style={{ background: livePx(frame, i) }} />
-            <div className="cell-tag" style={{ background: tagFill(covering) }} />
+            <div
+              className="cell-tag"
+              style={
+                owners.length || !dropped.length
+                  ? { background: tagFill(owners) }
+                  : { borderColor: tagColor(dropped[dropped.length - 1]) }
+              }
+            />
             {i % 10 === 0 && <span className="cell-index">{i}</span>}
           </div>
         );

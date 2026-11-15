@@ -84,3 +84,41 @@ export function modeExplanation(s: DeviceStatus | undefined): string {
       return 'Controlling single LEDs.';
   }
 }
+
+/** Rounding applies: group control can be used and partial lights are rounded (not switched to exact LEDs). */
+export const roundingActive = (d: Device) => groupsUsable(d) && d.partialGroups === 'round';
+
+/**
+ * Per LED, the lights that cover it after rounding to groups (what group control
+ * actually lights), in the same paint order as `exact`.
+ */
+export function roundedCoverage(exact: VirtualLight[][], lights: VirtualLight[], d: Device): VirtualLight[][] {
+  const byLed: VirtualLight[][] = Array.from({ length: d.ledCount }, () => []);
+  const ordered = [...lights].sort((a, b) => a.priority - b.priority || a.order - b.order);
+  for (const l of ordered)
+    for (const g of roundToGroups(l.ranges, d.ledCount, d.groupSize))
+      for (let i = g * d.groupSize; i < Math.min((g + 1) * d.groupSize, d.ledCount); i++) byLed[i].push(l);
+  return byLed.length === exact.length ? byLed : exact;
+}
+
+export interface RoundingAt {
+  /** Lights that light this LED only because of rounding. */
+  added: VirtualLight[];
+  /** Lights whose range includes this LED, but rounding leaves it out. */
+  dropped: VirtualLight[];
+}
+
+export function roundingAt(exact: VirtualLight[], rounded: VirtualLight[]): RoundingAt {
+  return { added: rounded.filter((l) => !exact.includes(l)), dropped: exact.filter((l) => !rounded.includes(l)) };
+}
+
+/** Tooltip suffix for an LED's owners, marking what rounding changed. */
+export function ownersTitle(exact: VirtualLight[], rounded?: VirtualLight[]): string {
+  if (!rounded) return exact.length ? ' · ' + exact.map((l) => l.name).join(' < ') : '';
+  const { dropped } = roundingAt(exact, rounded);
+  const parts = [
+    ...rounded.map((l) => (exact.includes(l) ? l.name : `${l.name} (added by rounding)`)),
+    ...dropped.map((l) => `${l.name} (dropped by rounding)`),
+  ];
+  return parts.length ? ' · ' + parts.join(' < ') : '';
+}
