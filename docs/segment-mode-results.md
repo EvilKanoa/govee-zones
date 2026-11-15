@@ -75,6 +75,81 @@ Left to the acceptance checklist: power cycle mid-state (A18), 24 h soak.
 
 ---
 
-## Round 2
+## Round 2 (2026-11-15)
 
-Not run yet: `pnpm cli probe --round 2 --ip 192.168.2.27`.
+File: `data/probe-r2-2026-11-15T20-12-43-741Z.json`.
+
+| Test | Observation | Confidence | Notes |
+|---|---|---|---|
+| 1 Groups | Pattern reaches the last LED; **15 blocks, all 4 LEDs** | High | 60 LEDs = 15 groups × 4, exactly. Bits 16–24 do nothing |
+| 2 White | Kelvin white clearly differs from RGB-mixed **and matches the app at both 2700 K and 6500 K** | High | Half the strip, A/B on the same LEDs; agrees with round 1 |
+| 2 White | Brightness: same at 2700 K; kelvin white barely brighter at 6500 K | Medium | The advantage of kelvin white is **accurate color**, not brightness |
+| 2 White | Kelvin sweep: no change below 2700 K or above 6500 K | Medium | Read as the firmware clamping to **2700–6500 K** |
+| 2 White | Up close, what warm white is made of: can't tell | — | Not needed: it matches the app |
+| 2 White | RGB and tint bytes varied (5 ways): **no difference** | High | With kelvin ≠ 0 the firmware ignores RGB and tint |
+| 3 Off | Only RGB 0 + kelvin 0 is dark; **brightness 0 looks the same as 1 %** | High | Agrees with round 1 (both "dark" groups there had RGB 0) |
+| 4 Glide | Brightness and color jumps: **short glide (< 0.5 s)** | Medium | Explains round 1's "smooth at 10/s" |
+| 4 Resend | Re-sending the same state: nothing visible | High | |
+| 5 Switch | Per-LED → segments is clean (a smooth glide to white) for **all three orders A, B and C** | Medium–high | Notes on every variant: "smooth blue to white", "initial flash from white to blue" |
+| 5 Switch | **The flash is when entering per-LED** (white → blue), not when returning | Medium | Contradicts round 1, which put the flash on the return. Likely a mix-up there: the hard per-LED cut looks like a flash next to the firmware glide. *What* flashes (a hard cut, or a brief other color) still needs confirming |
+| 5 Switch | Variant B: segment frames sent while per-LED was on **applied straight away** (went warm white during the pause) | Medium | A12 is false: segment commands override razer streaming |
+| 6 App | A segment command stopped a running app scene; warm white everywhere | High | |
+| 6 App | LAN brightness 50 clearly dims segment output | High | The strip's brightness scales segment mode too |
+
+## Where things stand (rounds 1 + 2)
+
+### Established
+
+- **Transport:** `ptReal` over UDP 4003, BLE frames `33 05 15 01 RR GG BB KH KL TR TG TB <mask>` and
+  `33 05 15 02 <pct> <mask>`; 3-byte mask, LSB first; several frames per datagram apply in order
+  (6 at once tested).
+- **Geometry:** each mask bit drives a **group of 4 LEDs**: 15 groups on this 60-LED strip.
+- **White:** kelvin white is the strip's real white and matches the Govee app at 2700 K and 6500 K.
+  Range 2700–6500 K. With kelvin set, the RGB and tint bytes are ignored. RGB-mixed white has
+  about the same brightness, but the wrong tint.
+- **RGB and brightness** per group, both 1–100 %. A group switches between white and RGB cleanly.
+- **Off** = RGB 0 + kelvin 0. Brightness 0 is clamped to the 1 % minimum.
+- **Firmware glide:** every change glides over < 0.5 s. A true instant snap isn't possible in segment mode.
+- **Holding:** no keepalive needed (≥ 3 min), survives `turn off`/`turn on`, re-sending the same state is invisible.
+- **Govee app:** a segment command ends a running scene. LAN `brightness` scales segment output.
+- **Switching:** back to segments is clean in any order. Segment commands take effect even while razer is enabled.
+
+### Still open
+
+| Question | Why it matters | How to settle |
+|---|---|---|
+| Entering per-LED: is the "flash" just the hard cut, or a brief wrong color/black? | Whether entering per-LED needs a mitigation | Ask; a short re-test if it's a wrong color |
+| Strips with more than 24 groups (> 96 LEDs at 4 per group): does a wider mask work, and is the group size always 4? | The real installation may be longer than this 60-LED test strip | Probe on the real strip, or treat as untested and fall back to per-LED |
+| More than 6 frames per datagram | Packing worst case (15 different looks) | Pack ≤ 6 per datagram; no test needed |
+| Power cycle mid-state (A18), 24 h soak | Robustness | Acceptance checklist |
+
+### Assumption status
+
+| ID | Status |
+|---|---|
+| A1, A2, A4, A5, A7, A9, A10, A13, A15, A16 | ✅ Confirmed |
+| A3 Real white | ✅ Confirmed at both ends (matches the app) |
+| A6 Off | ✅ RGB 0 + kelvin 0 (brightness 0 is not off) |
+| A8 Update rate | ⚠️ Firmware glides < 0.5 s on every change; stepping at 10/s looks smooth |
+| A11 Switch flash | ⚠️ Return is clean; entering per-LED shows a hard cut or flash |
+| A12 Segments ignored during razer | ❌ False: they apply. The invariant "no segment frames while held per-LED" now prevents real glitches, not just waste |
+| A14 Segment layout | 🔁 Replaced: 4-LED groups (15 here) |
+| A17 Kelvin range | ✅ 2700–6500 K |
+| A18 Power cycle | Open (acceptance checklist) |
+| A19 Mask size | Open for > 24 groups |
+
+### Impact on the plan (cumulative)
+
+| Plan area | Change |
+|---|---|
+| Data model (§2.2) | `segmentCount` → **`groupSize`** (LEDs per mask bit, default 4). Groups = ⌈ledCount / groupSize⌉, at most 24 until wider masks are tested. Longer strips: segment control disabled (per-LED only) with a clear reason. |
+| Geometry and rounding (§3.1) | Same rules on 4-LED groups; rounding moves an edge by at most 2 LEDs. |
+| `ct` lights and MQTT (§2.1, §3.7) | Discovery range **2700–6500 K** (was 2000–6535). Clamp commands to it. |
+| Encoding (§3.4) | White = kelvin with RGB and tint zero (they're ignored; zero is simplest). Off = RGB 0 + kelvin 0. Brightness 1–100; a lit group is never sent 0. Up to 6 frames per datagram. |
+| Fades (§3.4) | Keep stepping at 10/s, since the firmware's glide smooths the steps. Transition 0 still glides < 0.5 s in segment mode: document it rather than work around it. |
+| Switching (§3.3) | Return to segments: no special ordering or dwell needed (R6 simplified). Entering per-LED (R8): pending the flash question. R5 (no switch mid-fade) stays. |
+| Invariant I2 | Now essential: a segment frame sent while held per-LED would visibly override the stream. Segment and razer sends stay on separate coalesce keys, and a switch flushes the other kind. |
+| Brightness pin | Keep `brightness 100` on entry and every 30 s in **both** modes: LAN brightness scales segment output, so a change in the Govee app would otherwise dim everything. |
+| Release / un-release | Confirmed: on un-release, sending our state takes over from an app scene. |
+| Per-LED white | RGB-mixed white is about as bright, but the wrong tint. The UI says "approximate white", not "dimmer". |
+| UI wording | "Groups of 4 LEDs", never "segments", to avoid confusion with the Govee app. |
