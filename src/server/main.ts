@@ -19,6 +19,8 @@ const log = pino({
 });
 
 const store = new Store(config.dataDir);
+if (store.migrationNotes.length)
+  log.warn({ backup: store.migrationBackup, changes: store.migrationNotes }, 'converted the config from an older format (original kept as a backup)');
 const transport = config.simulate ? simulatedTransport(log.child({ module: 'sim' })) : udpTransport();
 const engine = new Engine(store, transport, log.child({ module: 'engine' }));
 

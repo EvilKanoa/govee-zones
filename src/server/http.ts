@@ -11,6 +11,7 @@ import { MAX_KELVIN, MIN_KELVIN } from '../shared/color.js';
 import type { AppSnapshot, ServerMessage } from '../shared/types.js';
 import type { Engine } from './engine.js';
 import type { MqttBridge } from './mqtt.js';
+import { migrateConfig } from './migrate.js';
 import { configImport, deviceInput, devicePatch, lightCommand, lightInput, lightPatch } from './schemas.js';
 import type { Store } from './store.js';
 
@@ -138,7 +139,8 @@ export async function createServer(opts: {
     return store.exportConfig();
   });
   app.post('/api/import', async (req) => {
-    const cfg = configImport.parse(req.body);
+    // Exports from before group control are converted the same way as the stored config.
+    const cfg = configImport.parse(migrateConfig((req.body ?? {}) as Record<string, unknown>).data);
     const ids = new Set(cfg.devices.map((d) => d.id));
     const orphan = cfg.lights.find((l) => !ids.has(l.deviceId));
     if (orphan) throw new Error(`light "${orphan.name}" references unknown device ${orphan.deviceId}`);

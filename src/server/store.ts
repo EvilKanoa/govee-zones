@@ -12,6 +12,7 @@ import type {
   VirtualLight,
 } from '../shared/types.js';
 import { defaultState } from './commands.js';
+import { migrateConfig } from './migrate.js';
 import { checkLight, configImport, lightState, type deviceInput, type devicePatch, type lightInput, type lightPatch } from './schemas.js';
 
 interface FileShape extends ConfigSnapshot {
@@ -33,6 +34,10 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
   private data: FileShape;
   private file: string | null;
   private saveTimer: NodeJS.Timeout | null = null;
+  /** What loading converted from an older config format (empty if nothing). The original is kept as a backup. */
+  readonly migrationNotes: string[] = [];
+  /** Where the pre-migration file was copied to, if a migration happened. */
+  readonly migrationBackup?: string;
 
   /** `dataDir` null keeps everything in memory (tests). */
   constructor(dataDir: string | null) {
@@ -40,8 +45,13 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
     this.file = dataDir ? path.join(dataDir, 'govee-zones.json') : null;
     this.data = { version: 1, devices: [], lights: [], states: {}, flags: {}, nextOrder: 0 };
     if (this.file && fs.existsSync(this.file)) {
-      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      // v0: no migrations. Config that no longer validates (e.g. removed capabilities) must be fixed by hand.
+      const original = fs.readFileSync(this.file, 'utf8');
+      const { data: raw, notes } = migrateConfig(JSON.parse(original));
+      if (notes.length) {
+        this.migrationNotes = notes;
+        this.migrationBackup = `${this.file}.pre-groups-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
+        fs.writeFileSync(this.migrationBackup, original);
+      }
       const parsed = configImport.safeParse({ version: 1, devices: raw.devices ?? [], lights: raw.lights ?? [] });
       if (!parsed.success) throw new Error(`invalid config in ${this.file}; fix it by hand:\n${z.prettifyError(parsed.error)}`);
       for (const l of parsed.data.lights) checkLight(l);
@@ -53,6 +63,7 @@ export class Store extends EventEmitter<{ change: [StoreEvent] }> {
         }),
       );
       this.data = { ...this.data, ...raw, devices: parsed.data.devices, lights: parsed.data.lights, states };
+      if (notes.length) this.flush(); // store the converted config right away
     }
   }
 

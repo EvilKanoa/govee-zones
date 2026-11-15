@@ -170,7 +170,7 @@ Open questions to check against the real strip (SPEC §9):
 - When every light is off, the strip is turned off. The last look is stored on the strip while it's off, so turning it on from the Govee app brings it back.
 - On startup, lights that were on resume. A strip that was idle is left alone (nothing is sent), so a restart doesn't kill a Govee scene.
 - On clean shutdown (SIGINT/SIGTERM), group mode sends nothing (the lights stay on); per-LED mode exits explicitly and turns the strip off. If the process crashes in per-LED mode, the strip freezes on its last frame.
-- **Upgrading from an earlier version:** the config format changed (no migration in v0). Light types `rgb_ct` and `dimmable` are gone, and light defaults are now `{ "brightness": …, "look": { "kind": "rgb", "color": [r,g,b] } }` or `{ "kind": "white", "mireds": 154–370 }`. The service refuses to start on an old config and lists what to fix.
+- **Upgrading from before group control:** the config is converted automatically on startup, and the original is kept beside it as `govee-zones.json.pre-groups-<time>.bak`. On/off and RGB lights keep their type and color; `dimmable` lights become RGB; `rgb_ct` lights become White (if their default was a color temperature) or RGB; the *When all lights are off* setting is dropped (the strip now always turns off). The log lists every change. Older exports are converted the same way on import. To use the strip's real white, switch a light's look to *White* in its editor.
 
 ## Development
 
