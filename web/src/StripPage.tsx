@@ -1,0 +1,315 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { AppSnapshot, Device, DeviceStatus, VirtualLight } from '../../src/shared/types';
+import { api } from './api';
+import type { Run } from './App';
+import { HouseView } from './HouseView';
+import { LightsList } from './LightsList';
+import { WhiteBalance } from './WhiteBalance';
+import { rangesToSet, setToRanges, tagColor } from './ranges';
+
+export function ModeBadge({ status }: { status?: DeviceStatus }) {
+  const mode = status?.mode ?? 'idle';
+  return (
+    <span className={`badge mode-${mode}`} title={status?.error}>
+      {mode}
+    </span>
+  );
+}
+
+/** Which lights cover each LED, bottom (lowest priority) first. */
+export type Coverage = VirtualLight[][];
+
+/** How a pointer gesture over LEDs should behave. */
+export type Tool = 'select' | 'finder' | 'outline';
+
+export interface ViewProps {
+  device: Device;
+  coverage: Coverage;
+  frame?: Uint8Array;
+  selection: Set<number>;
+  tool: Tool;
+  /** Commit a gesture's LEDs to the selection. */
+  onSelect: (leds: Set<number>) => void;
+  onPixel: (led: number) => void;
+  run: Run;
+}
+
+interface Props {
+  device: Device;
+  snapshot: AppSnapshot;
+  frame?: Uint8Array;
+  run: Run;
+}
+
+const VIEW_KEY = 'govee-zones:view';
+
+export function StripPage({ device, snapshot, frame, run }: Props) {
+  const lights = useMemo(
+    () => snapshot.lights.filter((l) => l.deviceId === device.id),
+    [snapshot.lights, device.id],
+  );
+  const status = snapshot.status[device.id];
+  const released = snapshot.flags[device.id]?.released ?? false;
+
+  const [view, setView] = useState<'strip' | 'house'>(() => {
+    try {
+      return localStorage.getItem(VIEW_KEY) === 'house' ? 'house' : 'strip';
+    } catch {
+      return 'strip';
+    }
+  });
+  const [selection, setSelection] = useState<Set<number>>(new Set());
+  const [tool, setTool] = useState<Tool>('select');
+  const [additive, setAdditive] = useState(false);
+  const [target, setTarget] = useState<string>('');
+
+  const coverage = useMemo(() => {
+    const byLed: Coverage = Array.from({ length: device.ledCount }, () => []);
+    const ordered = [...lights].sort((a, b) => a.priority - b.priority || a.order - b.order);
+    for (const l of ordered) for (const i of rangesToSet(l.ranges)) if (i < device.ledCount) byLed[i].push(l);
+    return byLed;
+  }, [lights, device.ledCount]);
+  const overlapCount = coverage.filter((c) => c.length > 1).length;
+
+  useEffect(() => {
+    if (!lights.some((l) => l.id === target)) setTarget(lights[0]?.id ?? '');
+  }, [lights, target]);
+
+  const switchView = (v: 'strip' | 'house') => {
+    setView(v);
+    if (v === 'strip' && tool === 'outline') setTool('select');
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
+
+  const changeTool = (t: Tool) => {
+    if (tool === 'finder' && t !== 'finder') void run(() => api.stopOverride(device.id));
+    setTool(t);
+  };
+
+  const onSelect = (leds: Set<number>) =>
+    setSelection((sel) => {
+      if (!additive) return leds;
+      const next = new Set(sel);
+      for (const i of leds) next.add(i);
+      return next;
+    });
+
+  const assign = (lightId: string, mode: 'add' | 'remove') => {
+    const l = lights.find((x) => x.id === lightId);
+    if (!l) return;
+    const cells = rangesToSet(l.ranges);
+    for (const i of selection) mode === 'add' ? cells.add(i) : cells.delete(i);
+    void run(async () => {
+      await api.updateLight(l.id, { ranges: setToRanges(cells) });
+      setSelection(new Set());
+    });
+  };
+
+  const createFromSelection = () =>
+    run(async () => {
+      const top = Math.max(-1, ...lights.map((l) => l.priority));
+      const created = await api.addLight({
+        name: `Light ${lights.length + 1}`,
+        deviceId: device.id,
+        ranges: setToRanges(selection),
+        priority: top + 1,
+      });
+      setTarget(created.id);
+      setSelection(new Set());
+    });
+
+  const viewProps: ViewProps = {
+    device,
+    coverage,
+    frame,
+    selection,
+    tool,
+    onSelect,
+    onPixel: (i) => void run(() => api.pixel(device.id, i)),
+    run,
+  };
+  const canDrive = !released && device.enabled;
+
+  return (
+    <section>
+      <div className="section-head">
+        <h2>
+          {device.name} <ModeBadge status={status} />
+        </h2>
+        <div className="row">
+          <label className="check" title="Stop streaming and hand the strip back to the Govee app (holiday scenes)">
+            <input type="checkbox" checked={released} onChange={(e) => run(() => api.release(device.id, e.target.checked))} />
+            Release to Govee
+          </label>
+          <button className="btn ghost" onClick={() => run(() => api.test(device.id))} disabled={!canDrive}>
+            Test chase
+          </button>
+        </div>
+      </div>
+
+      {status?.error && <div className="error">Send failed: {status.error}</div>}
+      {!device.enabled && <div className="notice">This device is disabled; nothing is sent to it.</div>}
+      {released && (
+        <div className="notice">
+          Released to Govee: the strip is not being streamed. Light changes are still saved and apply when you hold it again.
+        </div>
+      )}
+      {device.ledCount > device.maxColorsPerPacket && (
+        <div className="notice">
+          Reduced resolution: {device.ledCount} LEDs are sent as {device.maxColorsPerPacket} colors per frame, so edges
+          between lights may blend.
+        </div>
+      )}
+
+      <div className="strip-toolbar">
+        <div className="segmented" role="tablist">
+          <button className={view === 'strip' ? 'on' : ''} onClick={() => switchView('strip')}>
+            Strip
+          </button>
+          <button className={view === 'house' ? 'on' : ''} onClick={() => switchView('house')}>
+            House
+          </button>
+        </div>
+        <div className="segmented">
+          <button className={tool === 'select' ? 'on' : ''} onClick={() => changeTool('select')} title="Drag across LEDs to select them">
+            Select
+          </button>
+          <button
+            className={tool === 'finder' ? 'on' : ''}
+            onClick={() => changeTool('finder')}
+            disabled={!canDrive}
+            title="Tap an LED to light it on the real strip"
+          >
+            Pixel finder
+          </button>
+          {view === 'house' && (
+            <button className={tool === 'outline' ? 'on' : ''} onClick={() => changeTool('outline')} title="Trace the strip's path on the house">
+              Edit outline
+            </button>
+          )}
+        </div>
+        {tool === 'select' && (
+          <label className="check">
+            <input type="checkbox" checked={additive} onChange={(e) => setAdditive(e.target.checked)} />
+            Add to selection
+          </label>
+        )}
+      </div>
+      {tool !== 'outline' && (
+        <p className="muted small hint">
+          {tool === 'finder' ? 'Tap an LED to light just that one on the strip.' : 'Drag across LEDs to select them.'}
+          {tool === 'select' && overlapCount > 0 &&
+            ` ${overlapCount} LED${overlapCount > 1 ? 's are' : ' is'} covered by more than one light (striped).`}
+        </p>
+      )}
+
+      {view === 'strip' ? <StripView {...viewProps} /> : <HouseView {...viewProps} />}
+
+      {selection.size > 0 && tool === 'select' && (
+        <div className="selection-bar">
+          <span>
+            {selection.size} LED{selection.size > 1 ? 's' : ''} selected
+          </span>
+          <button className="btn" onClick={createFromSelection}>
+            New light
+          </button>
+          {lights.length > 0 && (
+            <span className="row tight">
+              <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label="Light">
+                {lights.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+              <button className="btn ghost" onClick={() => assign(target, 'add')}>
+                Add
+              </button>
+              <button className="btn ghost" onClick={() => assign(target, 'remove')}>
+                Remove
+              </button>
+            </span>
+          )}
+          <button className="link" onClick={() => setSelection(new Set())}>
+            Clear
+          </button>
+        </div>
+      )}
+
+      <LightsList device={device} lights={lights} snapshot={snapshot} released={released} run={run} />
+      <WhiteBalance device={device} canDrive={canDrive} run={run} />
+    </section>
+  );
+}
+
+/** Background for an LED's ownership bar: one color, or stripes where lights overlap. */
+export function tagFill(covering: VirtualLight[]): string {
+  const tags = covering.map(tagColor);
+  if (tags.length === 0) return 'transparent';
+  if (tags.length === 1) return tags[0];
+  return `repeating-linear-gradient(90deg, ${tags.map((c, k) => `${c} ${k * 4}px ${(k + 1) * 4}px`).join(', ')})`;
+}
+
+export const livePx = (frame: Uint8Array | undefined, i: number) =>
+  frame ? `rgb(${frame[i * 3]}, ${frame[i * 3 + 1]}, ${frame[i * 3 + 2]})` : '#000';
+
+function StripView({ device, coverage, frame, selection, tool, onSelect, onPixel }: ViewProps) {
+  const [drag, setDrag] = useState<{ anchor: number; current: number } | null>(null);
+
+  const span = (d: { anchor: number; current: number }) => {
+    const s = new Set<number>();
+    for (let i = Math.min(d.anchor, d.current); i <= Math.max(d.anchor, d.current); i++) s.add(i);
+    return s;
+  };
+
+  // Touch keeps targeting the first cell touched, so find the cell under the finger by position.
+  const cellAt = (x: number, y: number) => {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-led]');
+    return el ? Number(el.dataset.led) : null;
+  };
+
+  return (
+    <div
+      className="strip"
+      onPointerDown={(e) => {
+        const i = cellAt(e.clientX, e.clientY);
+        if (i === null) return;
+        if (tool === 'finder') return onPixel(i);
+        e.preventDefault();
+        // Capture so the drag finishes even if released outside the strip.
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setDrag({ anchor: i, current: i });
+      }}
+      onPointerMove={(e) => {
+        if (!drag) return;
+        const i = cellAt(e.clientX, e.clientY);
+        if (i !== null && i !== drag.current) setDrag({ ...drag, current: i });
+      }}
+      onPointerUp={() => {
+        if (drag) onSelect(span(drag));
+        setDrag(null);
+      }}
+      onPointerCancel={() => setDrag(null)}
+    >
+      {coverage.map((covering, i) => {
+        const selected = selection.has(i) || (!!drag && span(drag).has(i));
+        return (
+          <div
+            key={i}
+            data-led={i}
+            className={`cell${selected ? ' selected' : ''}${covering.length > 1 ? ' overlap' : ''}${tool === 'finder' ? ' finder' : ''}`}
+            title={`LED ${i}${covering.length ? ' · ' + covering.map((l) => l.name).join(' < ') : ''}`}
+          >
+            <div className="cell-live" style={{ background: livePx(frame, i) }} />
+            <div className="cell-tag" style={{ background: tagFill(covering) }} />
+            {i % 10 === 0 && <span className="cell-index">{i}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
