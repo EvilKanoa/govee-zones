@@ -222,14 +222,15 @@ frame / after → held, mode (reason).
 | 9 | want per_led, held none | turn_on, brightness_max, enable | composite | – | per_led / per_led |
 | 10 | want per_led, held groups (fading or not) | enable | composite | – | per_led / per_led |
 | 11 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| 12 | none, held per_led | groups_dark, disable, turn_off | – | – | none / idle |
-| 13 | none, held groups | turn_off | – | – | none / idle |
-| 14 | none, held none | – | – | – | none / idle |
-| 15 | none, held per_led, groups not available | disable, turn_off | – | – | none / idle |
-| 16 | none, held per_led, instant off (no fade) | groups_dark, disable, turn_off | – | – | none / idle (the darkening glides < 0.5 s instead of a hard cut; accepted) |
+| 12 | none, held per_led | groups_dark, disable, turn_off | – | – | off / idle |
+| 13 | none, held groups | turn_off | – | – | off / idle |
+| 14 | none, held none (startup, un-release) | turn_off | – | – | off / idle |
+| 15 | none, held per_led, groups not available | disable, turn_off | – | – | off / idle |
+| 16 | none, held off | – (engine: `turn_off` every 30 s) | – | – | off / idle |
+| 17–20 | off → groups / per_led (fresh entries, R3/R7); released or disabled while off → nothing, held none | | | | |
 
 **Invariant sweeps** over the full cross-product (enabled 2 × released 2 × available 2 × want 3 ×
-held 3 × fading 2 = 144 cases): I1–I7 from plan §3.3 (I7: nothing after `turn_off`).
+held 4 × fading 2 = 192 cases): I1–I7 from plan §3.3 (I7: nothing after `turn_off`).
 
 ### 2.5 `test/engine.test.ts`: scenarios (fake timers, recording transport)
 

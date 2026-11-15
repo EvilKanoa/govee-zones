@@ -55,7 +55,8 @@ describe('Engine: group control', () => {
   it('E1 enters group mode: brightness, frames, then turn on; never razer', async () => {
     const { engine, sent, A, device } = setup();
     await vi.advanceTimersByTimeAsync(200);
-    expect(sent).toEqual([]); // idle at start: nothing sent
+    expect(sent).toEqual(['turn:0']); // owned with nothing on: kept off
+    sent.length = 0;
 
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -89,7 +90,7 @@ describe('Engine: group control', () => {
     expect(sent).toEqual(['g 6-7 white 6494K', 'g 6-7 100%']);
   });
 
-  it('E4 all off (instant): turn off, and nothing after it', async () => {
+  it('E4 all off (instant): turn off, nothing after it, and keep it off every 30 s', async () => {
     const { engine, sent, A, device } = setup();
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -100,7 +101,7 @@ describe('Engine: group control', () => {
     expect(engine.status(device.id).mode).toBe('idle');
     sent.length = 0;
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(['turn:0', 'turn:0']); // undoes a power-on from the app or after a power cut
   });
 
   it('E4b fade-out in group mode: stepped brightness, then turn off as the very last datagram', async () => {
@@ -117,7 +118,7 @@ describe('Engine: group control', () => {
     expect(sent.at(-1)).toBe('turn:0'); // segment frames after turn off would turn the strip back on
     sent.length = 0;
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(['turn:0', 'turn:0']); // only ever turn off while idle
   });
 
   it('E6/E7 a partial light: Round keeps group mode, Exact switches to per-LED', async () => {
@@ -232,6 +233,20 @@ describe('Engine: group control', () => {
     engine.setReleased(device.id, false);
     await vi.advanceTimersByTimeAsync(200);
     expect(sent).toEqual(['bright:100', 'g 1-2 white 2703K', 'g 3-15 off', 'g 1-2 50%', 'turn:1']);
+  });
+
+  it('released with everything off sends nothing; taking it back turns the strip off', async () => {
+    const { engine, sent, device } = setup();
+    await vi.advanceTimersByTimeAsync(200);
+    sent.length = 0;
+    engine.setReleased(device.id, true);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(sent).toEqual([]);
+    expect(engine.status(device.id).mode).toBe('released');
+    engine.setReleased(device.id, false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(sent).toEqual(['turn:0']);
+    expect(engine.status(device.id).mode).toBe('idle');
   });
 
   it('E14 clean shutdown in group mode sends nothing (the strip keeps its lights)', async () => {

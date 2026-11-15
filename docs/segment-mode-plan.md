@@ -193,7 +193,9 @@ The planner ignores the current mode. Fade-related deferral lives in `decide()`.
 
 Inputs: `enabled`, `released`, `groupsAvailable`, `want`
 (`'none' | 'groups' | 'per_led'`; none = nothing visible and no override), `held`
-(`'none' | 'groups' | 'per_led'`), `fading` (a transition is running on this strip).
+(`'none' | 'off' | 'groups' | 'per_led'`; `off` = owned and kept off, `none` = not driving it),
+`fading` (a transition is running on this strip). Unless released or disabled, govee-zones owns the
+strip: with nothing on it keeps it off, and Release is the only way to hand it to the Govee app.
 
 Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 `after` (actions), `held`, `mode`, `reason`. Actions: `brightness_max`, `turn_on`, `enable`,
@@ -203,16 +205,17 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 |---|---|---|---|---|---|
 | R1 | `!enabled` | held per_led: `disable` | – | – | none / idle |
 | R2 | `released` | held per_led: `disable`. Held groups: nothing, the lights stay (F11: the app takes over when used) | – | – | none / released |
-| R3 | want groups, held none | `brightness_max` | groups | `turn_on` (F10: frames first, then power on, so no flash) | groups / groups |
+| R3 | want groups, held none or off | `brightness_max` | groups | `turn_on` (the frames light the strip themselves (F10); `turn_on` keeps its power state in sync) | groups / groups |
 | R4 | want groups, held groups | – | groups | – | groups / groups |
 | R5 | want groups, held per_led, **fading** | – | composite | – | per_led / per_led (`fade_finishing`) |
 | R6 | want groups, held per_led, not fading | `disable` | groups | – | groups / groups (F13: clean) |
-| R7 | want per_led, held none | `turn_on`, `brightness_max`, `enable` | composite | – | per_led / per_led |
+| R7 | want per_led, held none or off | `turn_on`, `brightness_max`, `enable` | composite | – | per_led / per_led |
 | R8 | want per_led, held groups | `enable` | composite | – | per_led / per_led (hard cut, accepted) |
 | R9 | want per_led, held per_led | – | composite | – | per_led / per_led |
-| R10 | want none, held per_led | groups available: `groups_dark` (all groups off; applies over the stream, F14, invisible because the composite is black by now), `disable`, `turn_off`. Otherwise: `disable`, `turn_off` | – | – | none / idle |
-| R11 | want none, held groups | `turn_off` | – | – | none / idle |
-| R12 | want none, held none | – | – | – | none / idle (startup sends nothing, so a restart doesn't kill a Govee scene) |
+| R10 | want none, held per_led | groups available: `groups_dark` (all groups off; applies over the stream, F14, invisible because the composite is black by now), `disable`, `turn_off`. Otherwise: `disable`, `turn_off` | – | – | off / idle |
+| R11 | want none, held groups | `turn_off` | – | – | off / idle |
+| R12 | want none, held none | `turn_off` | – | – | off / idle (take ownership with everything off: startup, un-release, re-enable) |
+| R13 | want none, held off | – (the engine re-sends `turn_off` every 30 s: undoes a power-on from the app or after a power cut) | – | – | off / idle |
 
 **Invariants** (asserted over the full input cross-product):
 
@@ -223,7 +226,7 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | null`),
 - I3: Razer frames only when the resulting held is `per_led`.
 - I4: Entering groups from none sends frames before `turn_on`.
 - I5: A fade never causes a per-LED → groups switch (R5).
-- I6: Nothing held + nothing wanted → no output at all.
+- I6: Owned (enabled, not released) with nothing wanted → held `off`. Released or disabled → nothing is sent at all.
 - I7: Nothing is sent after `turn_off` (F10).
 
 ### 3.4 Engine (`engine.ts`)

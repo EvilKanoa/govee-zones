@@ -184,9 +184,8 @@ All settings are environment variables. Everything else is configured in the web
 
 ## Behavior and limitations
 
-- **All lights off turns the strip off.** Turning it back on from the Govee app shows whatever govee-zones last sent (after a fade-out, that's very dim).
-- **While any light is on, govee-zones keeps the strip as you set it.** Every 30 s it re-sends the current state, so changes made in the Govee app (power, brightness, scenes) are undone. With every light off it sends nothing, and the app works normally. To use the app while lights are on, turn on **Release to Govee** first.
-- **Restarts don't blink the lights.** At startup, strips whose lights were on pick up where they left off, and idle strips are left alone. On a clean shutdown, group mode sends nothing; per-LED mode exits and turns the strip off.
+- **govee-zones owns the strip unless it's released.** With lights on, it shows them; with every light off, it keeps the strip off. Every 30 s it re-sends that state, so a change made elsewhere (the Govee app, a voice assistant, a schedule, or the strip coming back on after a power cut) is undone within half a minute. To use the Govee app or its scenes, turn on **Release to Govee**: govee-zones then sends nothing until you turn it off again.
+- **Restarts don't blink the lights.** At startup, strips whose lights were on pick up where they left off, strips with every light off are turned off, and released strips are left alone. On a clean shutdown, group mode sends nothing (the lights stay); per-LED mode exits and turns the strip off.
 - **Per-LED white is approximate.** In group mode white is the strip's own. In per-LED mode it's mixed from RGB. *White balance* on the strip page corrects that mix: flip between *Show mixed white* and *Show real white* and adjust until they match.
 - **Group changes glide** over about half a second. That's the strip's firmware, and it applies even with a transition of 0.
 - **Untested hardware.** Strips with more than 24 groups (over 96 LEDs at 4 per group) automatically use per-LED control.
@@ -195,6 +194,7 @@ All settings are environment variables. Everything else is configured in the web
 ## Troubleshooting
 
 - **Nothing happens.** Check that LAN Control is on in the Govee app and that the IP is right, then use *Test* on the Devices page. The error banner and the Mode sensor show send failures.
+- **The strip won't stay on from the Govee app.** That's expected while it isn't released: govee-zones keeps it the way your lights say. Turn on **Release to Govee** to use the app.
 - **Lights turn off or change on their own.** Something else is controlling the strip. Common causes:
   - a second govee-zones instance (an old container, or a dev copy) that isn't released,
   - another Govee integration (e.g. govee2mqtt or a cloud integration) with automations or scenes,
@@ -234,3 +234,7 @@ Design notes:
 - [`docs/segment-mode-plan.md`](docs/segment-mode-plan.md): group control.
 - [`docs/segment-mode-results.md`](docs/segment-mode-results.md): the hardware findings behind it.
 - [`docs/segment-mode-testing.md`](docs/segment-mode-testing.md): test plan and probe.
+
+## License
+
+[MIT](LICENSE)

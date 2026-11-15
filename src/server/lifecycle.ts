@@ -1,5 +1,7 @@
 // Control lifecycle: what to send when moving between group control, per-LED
-// streaming and off. Pure. Rules R1-R12 in docs/segment-mode-plan.md §3.3.
+// streaming and off. Pure. Rules R1-R13 in docs/segment-mode-plan.md §3.3.
+// Unless released or disabled, govee-zones owns the strip: lights on → it shows
+// them; all off → it keeps the strip off (the engine re-sends `turn_off`).
 
 /**
  * `brightness_max` pins the strip's own brightness at 100 %: it scales both razer
@@ -8,8 +10,8 @@
  */
 export type Action = 'brightness_max' | 'turn_on' | 'enable' | 'disable' | 'turn_off' | 'groups_dark';
 
-/** What we currently hold the strip in. */
-export type Held = 'none' | 'groups' | 'per_led';
+/** What we currently hold the strip in. `off`: owned and kept off. `none`: not driving it (startup, released, disabled). */
+export type Held = 'none' | 'off' | 'groups' | 'per_led';
 
 export interface PolicyInput {
   enabled: boolean;
@@ -17,7 +19,7 @@ export interface PolicyInput {
   /** Group frames may be sent to this strip at all (group size set, fits the mask, control = auto). */
   groupsAvailable: boolean;
   /** What the lights/overrides need now; `none` = nothing visible and no override. */
-  want: Held;
+  want: 'none' | 'groups' | 'per_led';
   held: Held;
   /** A transition is running on this strip. */
   fading: boolean;
@@ -45,15 +47,16 @@ export function decide(p: PolicyInput): Decision {
   // R2: groups hold by themselves; the Govee app takes over when it's used.
   if (p.released) return d({ before: leavePerLed, held: 'none', mode: 'released' });
 
+  const fresh = p.held === 'none' || p.held === 'off';
   if (p.want === 'groups') {
-    if (p.held === 'none') return d({ before: ['brightness_max'], frame: 'groups', after: ['turn_on'], held: 'groups', mode: 'groups' }); // R3
+    if (fresh) return d({ before: ['brightness_max'], frame: 'groups', after: ['turn_on'], held: 'groups', mode: 'groups' }); // R3
     if (p.held === 'groups') return d({ frame: 'groups', held: 'groups', mode: 'groups' }); // R4
     if (p.fading) return d({ frame: 'composite', held: 'per_led', mode: 'per_led', fadeFinishing: true }); // R5
     return d({ before: ['disable'], frame: 'groups', held: 'groups', mode: 'groups' }); // R6
   }
 
   if (p.want === 'per_led') {
-    if (p.held === 'none') return d({ before: ['turn_on', 'brightness_max', 'enable'], frame: 'composite', held: 'per_led', mode: 'per_led' }); // R7
+    if (fresh) return d({ before: ['turn_on', 'brightness_max', 'enable'], frame: 'composite', held: 'per_led', mode: 'per_led' }); // R7
     if (p.held === 'groups') return d({ before: ['enable'], frame: 'composite', held: 'per_led', mode: 'per_led' }); // R8
     return d({ frame: 'composite', held: 'per_led', mode: 'per_led' }); // R9
   }
@@ -64,9 +67,11 @@ export function decide(p: PolicyInput): Decision {
     // R10: darken the groups over the stream (invisible: the composite is black by now)
     // so `disable` reveals nothing, then turn off once razer is no longer enabled.
     return p.groupsAvailable
-      ? d({ before: ['groups_dark', 'disable', 'turn_off'], held: 'none', mode: 'idle' })
-      : d({ before: ['disable', 'turn_off'], held: 'none', mode: 'idle' });
+      ? d({ before: ['groups_dark', 'disable', 'turn_off'], held: 'off', mode: 'idle' })
+      : d({ before: ['disable', 'turn_off'], held: 'off', mode: 'idle' });
   }
-  if (p.held === 'groups') return d({ before: ['turn_off'], held: 'none', mode: 'idle' }); // R11
-  return d({ held: 'none', mode: 'idle' }); // R12: startup sends nothing
+  if (p.held === 'groups') return d({ before: ['turn_off'], held: 'off', mode: 'idle' }); // R11
+  // R12: take ownership with everything off (startup, un-release, re-enable): turn off.
+  if (p.held === 'none') return d({ before: ['turn_off'], held: 'off', mode: 'idle' });
+  return d({ held: 'off', mode: 'idle' }); // R13: already off; the engine re-sends turn_off every 30 s
 }

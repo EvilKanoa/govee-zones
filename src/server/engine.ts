@@ -20,7 +20,7 @@ import {
   type Transition,
 } from './compositor.js';
 import { encodeGroups, groupPixels, packDatagrams, type SentGroup } from './groupOutput.js';
-import { decide, type Action, type Decision, type Held } from './lifecycle.js';
+import { decide, type Action, type Decision, type Held, type PolicyInput } from './lifecycle.js';
 import { groupLooks, isVisible, plan, type GroupLook, type PlanResult } from './plan.js';
 import * as proto from './protocol.js';
 import { describeSegmentFrame } from './transport.js';
@@ -85,7 +85,7 @@ export class Engine extends EventEmitter<{
     store.on('change', (e) => this.onStoreChange(e));
   }
 
-  /** Apply the policy to every device. Idle devices get nothing, so a restart doesn't kill a Govee scene. */
+  /** Apply the policy to every device: lights that were on resume, owned strips with nothing on are turned off, released strips get nothing. */
   start() {
     for (const d of this.store.devices) this.requestTick(d.id);
   }
@@ -317,7 +317,7 @@ export class Engine extends EventEmitter<{
 
     const groupsAvailable = !groupsUnavailable(d);
     let pl: PlanResult | undefined;
-    let want: Held = 'none';
+    let want: PolicyInput['want'] = 'none';
     if (ov) want = ov.needsLeds || !groupsAvailable ? 'per_led' : 'groups';
     else if (lights.some((l) => isVisible(states[l.id], now))) {
       pl = plan(d, lights, states, now);
@@ -331,6 +331,9 @@ export class Engine extends EventEmitter<{
     const before = [...dec.before];
     const due = now - c.lastAssert > REASSERT_MS;
     if (dec.held === 'per_led' && !before.includes('enable') && due) before.push('brightness_max', 'enable');
+    // Owned and off: keep it off (undoes a power-on from the Govee app or after a power cut).
+    if (dec.held === 'off' && !before.length && due) before.push('turn_off');
+    if (dec.held === 'off' && before.includes('turn_off')) c.lastAssert = now;
     const after = [...dec.after];
     if (dec.held === 'groups' && dec.frame === 'groups' && !before.includes('brightness_max') && due) {
       // Undo Govee app changes. Ends with turn_on: if the app powered the strip off, the
@@ -377,7 +380,7 @@ export class Engine extends EventEmitter<{
     const fast = fading || !!ov?.animated;
     let next: number | null =
       c.held === 'per_led' ? (fast ? FRAME_INTERVAL_MS : d.keepaliveMs)
-      : c.held === 'groups' ? (fast ? GROUP_STEP_MS : Math.max(GROUP_STEP_MS, REASSERT_MS - (now - c.lastAssert) + 1))
+      : c.held === 'groups' || c.held === 'off' ? (fast ? GROUP_STEP_MS : Math.max(GROUP_STEP_MS, REASSERT_MS - (now - c.lastAssert) + 1))
       : fast ? FRAME_INTERVAL_MS : null;
     if (ov) next = Math.min(next ?? Infinity, ov.until - now);
     if (next !== null) c.timer = setTimeout(() => void this.tick(deviceId), Math.max(0, next));
