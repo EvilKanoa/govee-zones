@@ -21,8 +21,8 @@ describe('lifecycle.decide (plan §3.3, testing plan §2.4)', () => {
     ['10 R8 groups → per-LED', { want: 'per_led', held: 'groups' }, [['enable'], 'composite', [], 'per_led', 'per_led']],
     ['10b R8 while fading too', { want: 'per_led', held: 'groups', fading: true }, [['enable'], 'composite', [], 'per_led', 'per_led']],
     ['11 R9 stay per-LED', { want: 'per_led', held: 'per_led' }, [[], 'composite', [], 'per_led', 'per_led']],
-    ['12 R10 off from per-LED', { held: 'per_led' }, [['groups_dark', 'disable', 'turn_off'], 'park', [], 'none', 'idle']],
-    ['13 R11 off from groups', { held: 'groups' }, [['turn_off'], 'park', [], 'none', 'idle']],
+    ['12 R10 off from per-LED', { held: 'per_led' }, [['groups_dark', 'disable', 'turn_off'], null, [], 'none', 'idle']],
+    ['13 R11 off from groups', { held: 'groups' }, [['turn_off'], null, [], 'none', 'idle']],
     ['14 R12 nothing to do (startup)', {}, [[], null, [], 'none', 'idle']],
     ['15 R10 without group control', { held: 'per_led', groupsAvailable: false }, [['disable', 'turn_off'], null, [], 'none', 'idle']],
   ])('%s', (_name, input, expected) => {
@@ -50,7 +50,7 @@ describe('lifecycle.decide (plan §3.3, testing plan §2.4)', () => {
                 // I1: leaving per-LED starts with disable (groups_dark may come first, R10).
                 if (held === 'per_led' && d.held !== 'per_led') expect(d.before.filter((a) => a !== 'groups_dark')[0]).toBe('disable');
                 // I2: no group frames while per-LED stays held; groups_dark only right before disable.
-                if (d.held === 'per_led') expect(d.frame === 'groups' || d.frame === 'park' || all.includes('groups_dark')).toBe(false);
+                if (d.held === 'per_led') expect(d.frame === 'groups' || all.includes('groups_dark')).toBe(false);
                 if (all.includes('groups_dark')) expect(d.before[d.before.indexOf('groups_dark') + 1]).toBe('disable');
                 // I2b: turn_off never while razer is enabled.
                 if (d.before.includes('turn_off')) {
@@ -60,8 +60,8 @@ describe('lifecycle.decide (plan §3.3, testing plan §2.4)', () => {
                 }
                 // I3: razer frames only when per-LED is held.
                 if (d.frame === 'composite') expect(d.held).toBe('per_led');
-                // Group frames only when group control may be used (park also needs it).
-                if ((d.frame === 'groups' || d.frame === 'park') && want !== 'groups') expect(groupsAvailable || held === 'groups').toBe(true);
+                // Nothing after turn_off: segment frames sent to a strip that is off turn it back on.
+                if (all.includes('turn_off')) expect([d.before.at(-1), d.frame, d.after.length]).toEqual(['turn_off', null, 0]);
                 // I4: entering groups from none sends frames before turn_on.
                 if (held === 'none' && d.held === 'groups') expect(d.after).toContain('turn_on');
                 // I5: a fade never causes a per-LED → groups switch.

@@ -88,7 +88,7 @@ describe('Engine: group control', () => {
     expect(sent).toEqual(['g 6-7 white 6494K', 'g 6-7 100%']);
   });
 
-  it('E4 all off (instant): turn off; the parked look already matches, so nothing else', async () => {
+  it('E4 all off (instant): turn off, and nothing after it', async () => {
     const { engine, sent, A, device } = setup();
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -102,7 +102,7 @@ describe('Engine: group control', () => {
     expect(sent).toEqual([]);
   });
 
-  it('E4b fade-out in group mode: stepped brightness, turn off, then park the pre-fade look', async () => {
+  it('E4b fade-out in group mode: stepped brightness, then turn off as the very last datagram', async () => {
     const { engine, sent, A } = setup();
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -113,7 +113,10 @@ describe('Engine: group control', () => {
     expect(steps.length).toBeGreaterThanOrEqual(8); // ~10 steps, 100 ms apart
     const pcts = steps.map((s) => Number(/(\d+)%$/.exec(s)![1]));
     expect(pcts).toEqual([...pcts].sort((a, b) => b - a)); // monotonic
-    expect(sent.slice(-2)).toEqual(['turn:0', 'g 1-2 100%']); // park while off
+    expect(sent.at(-1)).toBe('turn:0'); // segment frames after turn off would turn the strip back on
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sent).toEqual([]);
   });
 
   it('E6/E7 a partial light: Round keeps group mode, Exact switches to per-LED', async () => {
@@ -133,7 +136,7 @@ describe('Engine: group control', () => {
     }
   });
 
-  it('E5 per-LED fade-out (exact light): razer to black, darken groups, disable, turn off, park', async () => {
+  it('E5 per-LED fade-out (exact light): razer to black, darken groups, disable, turn off', async () => {
     const { engine, sent, store, device } = setup({ partialGroups: 'exact' });
     const P = store.addLight({ name: 'Gutter', deviceId: device.id, ranges: [[8, 13]], priority: 1, capability: 'rgb', defaults: { brightness: 255, look: { kind: 'rgb', color: [255, 0, 0] } }, transitionMs: 0 });
     engine.command(P.id, { state: 'ON' });
@@ -143,7 +146,7 @@ describe('Engine: group control', () => {
     await vi.advanceTimersByTimeAsync(1500);
     const exit = sent.indexOf('disable');
     expect(sent.slice(0, exit - 1).every((s) => s === 'frame')).toBe(true); // R5: razer until the fade ends
-    expect(sent.slice(exit - 1)).toEqual(['g 1-15 off', 'disable', 'turn:0', 'g 3-4 rgb #ff0000', 'g 3-4 100%']);
+    expect(sent.slice(exit - 1)).toEqual(['g 1-15 off', 'disable', 'turn:0']);
     expect(engine.status(device.id).mode).toBe('idle');
   });
 
@@ -181,10 +184,7 @@ describe('Engine: group control', () => {
     expect(sent).not.toContain('enable');
     expect(sent.filter((s) => s === 'g 1-2 white 6500K').length).toBeGreaterThanOrEqual(2);
     expect(sent.filter((s) => s === 'g 1-2 off').length).toBeGreaterThanOrEqual(2);
-    // Nothing was on: turn off, then park dark (nothing to restore), so an outside turn-on isn't a blink frame.
-    const off = sent.lastIndexOf('turn:0');
-    expect(off).toBeGreaterThan(0);
-    expect(sent.slice(off + 1).every((x) => x.endsWith(' off'))).toBe(true);
+    expect(sent.at(-1)).toBe('turn:0'); // nothing was on: back to off, nothing after
   });
 
   it('E9 pixel finder switches to per-LED and back, without turning off', async () => {
@@ -242,7 +242,7 @@ describe('Engine: group control', () => {
     expect(sent).toEqual([]);
   });
 
-  it('E15 clean shutdown in per-LED mode: darken, disable, turn off, park', async () => {
+  it('E15 clean shutdown in per-LED mode: darken, disable, turn off', async () => {
     const { engine, sent, A, device } = setup();
     engine.command(A.id, { state: 'ON' });
     await vi.advanceTimersByTimeAsync(50);
@@ -250,7 +250,7 @@ describe('Engine: group control', () => {
     await vi.advanceTimersByTimeAsync(100);
     sent.length = 0;
     await engine.stop();
-    expect(sent).toEqual(['g 1-15 off', 'disable', 'turn:0', 'g 1-2 white 2703K', 'g 1-2 100%']);
+    expect(sent).toEqual(['g 1-15 off', 'disable', 'turn:0']);
   });
 
   it('E16 restart with a light on: frames before turn on, no razer, no turn off', async () => {

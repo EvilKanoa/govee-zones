@@ -167,7 +167,7 @@ Open questions to check against the real strip (SPEC §9):
 - **White balance** corrects RGB-mixed white (per-LED mode) and RGB colors. With group control, flip between *Show mixed white* and *Show real white* on the strip and adjust until they match.
 - Never binds UDP 4002, so it coexists with govee2mqtt on the same host. Devices are configured by IP only.
 - While this service drives a strip, **govee2mqtt's reported state for it will be wrong**. Use *Release to Govee* for scenes.
-- When every light is off, the strip is turned off. The last look is stored on the strip while it's off, so turning it on from the Govee app brings it back.
+- When every light is off, the strip is turned off. Turning it on from the Govee app shows whatever was last sent (after a fade-out, that's very dim).
 - On startup, lights that were on resume. A strip that was idle is left alone (nothing is sent), so a restart doesn't kill a Govee scene.
 - On clean shutdown (SIGINT/SIGTERM), group mode sends nothing (the lights stay on); per-LED mode exits explicitly and turns the strip off. If the process crashes in per-LED mode, the strip freezes on its last frame.
 - **Upgrading from before group control:** the config is converted automatically on startup, and the original is kept beside it as `govee-zones.json.pre-groups-<time>.bak`. On/off and RGB lights keep their type and color; `dimmable` lights become RGB; `rgb_ct` lights become White (if their default was a color temperature) or RGB; the *When all lights are off* setting is dropped (the strip now always turns off). The log lists every change. Older exports are converted the same way on import. To use the strip's real white, switch a light's look to *White* in its editor.

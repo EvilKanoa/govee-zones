@@ -26,8 +26,8 @@ export interface PolicyInput {
 export interface Decision {
   /** Sent first, in order. */
   before: Action[];
-  /** `groups`: the planned group looks. `composite`: a razer frame. `park`: the parked group looks (strip is off). */
-  frame: 'groups' | 'composite' | 'park' | null;
+  /** `groups`: the planned group looks. `composite`: a razer frame. */
+  frame: 'groups' | 'composite' | null;
   /** Sent after the frame. */
   after: Action[];
   held: Held;
@@ -58,14 +58,15 @@ export function decide(p: PolicyInput): Decision {
     return d({ frame: 'composite', held: 'per_led', mode: 'per_led' }); // R9
   }
 
-  // Nothing visible: always turn the strip off, then park the last look while it's off.
+  // Nothing visible: always turn the strip off, and send nothing after it: segment
+  // frames sent to a strip that is off turn it back on (local hardware test).
   if (p.held === 'per_led') {
-    // R10: `turn_off` doesn't stick while razer is enabled, so darken the groups over
-    // the stream (invisible: the composite is black by now), disable, then turn off.
+    // R10: darken the groups over the stream (invisible: the composite is black by now)
+    // so `disable` reveals nothing, then turn off once razer is no longer enabled.
     return p.groupsAvailable
-      ? d({ before: ['groups_dark', 'disable', 'turn_off'], frame: 'park', held: 'none', mode: 'idle' })
+      ? d({ before: ['groups_dark', 'disable', 'turn_off'], held: 'none', mode: 'idle' })
       : d({ before: ['disable', 'turn_off'], held: 'none', mode: 'idle' });
   }
-  if (p.held === 'groups') return d({ before: ['turn_off'], frame: 'park', held: 'none', mode: 'idle' }); // R11
+  if (p.held === 'groups') return d({ before: ['turn_off'], held: 'none', mode: 'idle' }); // R11
   return d({ held: 'none', mode: 'idle' }); // R12: startup sends nothing
 }

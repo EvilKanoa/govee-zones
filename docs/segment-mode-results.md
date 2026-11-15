@@ -188,3 +188,18 @@ Green = old stored state, blue = per-LED, warm white = parked look.
 |---|---|
 | Does per-LED revert at all, and after how long? | Not needed for the design. Could be checked with a longer wait (10+ min) if it ever matters |
 | The full R10 turn-off sequence on hardware | Acceptance checks H4b and H5 |
+
+---
+
+## Local test with the service (2026-11-15)
+
+Running the new service against the strip (`pnpm dev`, no MQTT):
+
+| Observation | Meaning |
+|---|---|
+| Turning off the last light (with a fade): it dimmed down, then **came back on**; it sometimes turned off "randomly" later | The service sent `turn off`, then the parked look. **Segment frames sent to a strip that is off turn it back on**, apparently while its power state stays off, so the firmware later turns it dark. Round 1 test 5a and round 3 test 1 are both consistent with this; they were misread as "stored silently" and "turn off doesn't stick during razer" |
+| Ctrl-C (group mode sends nothing on shutdown): the light stayed on, then changed when the service restarted | Likely the same half-off state left behind by an earlier turn-off; to re-check after the fix |
+
+Fix: parking is dropped, and nothing is sent after `turn off` (plan §3.5a, invariant I7). Round 3's
+F15 ("turn off doesn't stick while razer is enabled") is unproven: the park frames that followed
+may be what turned it back on. R10 keeps `turn_off` after `disable` anyway, which is safe either way.

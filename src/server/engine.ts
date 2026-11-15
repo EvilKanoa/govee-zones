@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import type { Logger } from 'pino';
 import { miredsToRgb } from '../shared/color.js';
 import { groupCount, groupsUnavailable, roundToGroups } from '../shared/groups.js';
-import type { ControlReason, Device, DeviceStatus, LightCommand, LightState } from '../shared/types.js';
+import type { ControlReason, Device, DeviceStatus, LightCommand } from '../shared/types.js';
 import { applyCommand, commandTransitionMs } from './commands.js';
 import {
   animating,
@@ -62,8 +62,6 @@ interface Controller {
   override?: Override;
   /** Group state we believe the strip holds (diffing base). Empty = unknown → full send. */
   sentGroups: (SentGroup | undefined)[];
-  /** States of the lights that were on most recently: what gets parked when everything turns off. */
-  parkSource: Record<string, LightState>;
 }
 
 const geometryOf = (d: Device) => `${d.ledCount}:${d.groupSize}:${d.whiteBalance?.join(',') ?? ''}`;
@@ -246,7 +244,7 @@ export class Engine extends EventEmitter<{
   private controller(d: Device): Controller {
     let c = this.ctl.get(d.id);
     if (!c) {
-      c = { held: 'none', mode: 'idle', ip: d.ip, geometry: geometryOf(d), timer: null, lastTick: 0, lastAssert: 0, sentGroups: [], parkSource: {} };
+      c = { held: 'none', mode: 'idle', ip: d.ip, geometry: geometryOf(d), timer: null, lastTick: 0, lastAssert: 0, sentGroups: [] };
       this.ctl.set(d.id, c);
     }
     return c;
@@ -315,8 +313,6 @@ export class Engine extends EventEmitter<{
       states[l.id] = this.renderState(l.id);
       if (this.transitions.has(l.id) && !transitionActive(this.transitions.get(l.id), now)) this.transitions.delete(l.id);
     }
-    const lit = lights.filter((l) => states[l.id].on);
-    if (lit.length) c.parkSource = Object.fromEntries(lit.map((l) => [l.id, this.store.state(l.id)]));
 
     const groupsAvailable = !groupsUnavailable(d);
     let pl: PlanResult | undefined;
@@ -351,9 +347,6 @@ export class Engine extends EventEmitter<{
       preview = ov ? ov.render(now) : composite(d, lights, states, now);
       const corrected = applyWhiteBalance(preview, d.whiteBalance);
       ok = (await this.send(c.ip, proto.frame(downsample(corrected, d.maxColorsPerPacket)), c, 'frame')) && ok;
-    } else if (dec.frame === 'park') {
-      ok = (await this.sendGroups(d, c, this.parkLooks(d, c, now), false)) && ok;
-      preview = new Uint8Array(d.ledCount * 3); // the strip is off
     } else if (dec.frame === 'groups') {
       const looks = ov?.renderGroups ? ov.renderGroups(now) : pl?.control === 'groups' ? pl.groups : groupLooks(d, lights, states, now);
       ok = (await this.sendGroups(d, c, looks, fullGroups)) && ok;
@@ -390,17 +383,6 @@ export class Engine extends EventEmitter<{
     if (ov) return ['override', [ov.name]];
     if (pl?.control === 'per_led') return [pl.reason, pl.detail];
     return [undefined, undefined];
-  }
-
-  /** The lights that were on most recently, steady (no fades), rounded to groups. */
-  private parkLooks(d: Device, c: Controller, now: number): GroupLook[] {
-    const lights = this.store.lightsFor(d.id);
-    const states: Record<string, RenderState> = {};
-    for (const l of lights) {
-      const s = c.parkSource[l.id];
-      states[l.id] = s ? { ...s, on: true } : { ...this.store.state(l.id), on: false };
-    }
-    return groupLooks(d, lights, states, now);
   }
 
   private async sendGroups(d: Device, c: Controller, looks: GroupLook[], full: boolean): Promise<boolean> {
@@ -451,7 +433,7 @@ export class Engine extends EventEmitter<{
 
   /**
    * Clean shutdown. Group mode sends nothing: the strip keeps its lights. Per-LED
-   * exits like "all off" (darken groups, disable, turn off, park), so the strip
+   * exits like "all off" (darken groups, disable, turn off), so the strip
    * isn't left in razer mode.
    */
   async stop() {
@@ -466,7 +448,6 @@ export class Engine extends EventEmitter<{
       pending.push(
         (async () => {
           await this.runActions(d, dec.before, c);
-          if (dec.frame === 'park') await this.sendGroups(d, c, this.parkLooks(d, c, this.now()), false);
         })(),
       );
       c.held = 'none';
