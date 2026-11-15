@@ -1,6 +1,6 @@
 # govee-zones
 
-Split one Govee RGBIC strip (e.g. H805A Permanent Outdoor Lights Elite) into independent **virtual lights**, controlled fully locally over the LAN "razer"/DreamView streaming protocol. See [`SPEC.md`](SPEC.md) for the full design.
+Split one Govee RGBIC strip (e.g. H805A Permanent Outdoor Lights Elite) into independent **virtual lights**, controlled fully locally over the LAN. Strips are normally driven with the Govee app's own segment commands in **groups of 4 LEDs**, which use the strip's real white and hold their state without govee-zones; the "razer"/DreamView streaming protocol (single LEDs) is the fallback. See [`SPEC.md`](SPEC.md) for the original design and [`docs/segment-mode-plan.md`](docs/segment-mode-plan.md) for group control.
 
 > **Status:** the web UI, compositor, streaming lifecycle, MQTT / Home Assistant bridge, protocol CLI and Docker packaging are implemented. Without `MQTT_HOST` the service runs with the web UI only.
 
@@ -38,7 +38,7 @@ docker run -d --name govee-zones -p 8737:8080 -v ./data:/data \
   -e MQTT_HOST=192.168.1.10 -e MQTT_USERNAME=… -e MQTT_PASSWORD=… govee-zones
 ```
 
-`docker stop` sends SIGTERM, and the service exits streaming on each strip before stopping. Keep the stop timeout at 10 s or more.
+`docker stop` sends SIGTERM, and the service exits per-LED streaming on each strip before stopping (group mode needs nothing). Keep the stop timeout at 10 s or more.
 
 **Published image.** `.github/workflows/docker.yml` runs typecheck and tests, then pushes `ghcr.io/evilkanoa/govee-zones` for amd64 and arm64. It tags `latest` from `main`, plus `vX.Y.Z` tags and `sha-…`. GHCR packages start out private: make the package public (GitHub → Packages → govee-zones → Package settings) or `docker login ghcr.io` on the host before pulling.
 
@@ -110,9 +110,9 @@ MQTT_HOST=192.168.x.x MQTT_USERNAME=… MQTT_PASSWORD=… pnpm dev
 
 The topbar shows an **MQTT** dot (green when connected). Each strip becomes one HA device with:
 
-- **One light per virtual light**, using the JSON schema. Supported modes follow the light's capability: `onoff`, `brightness`, `rgb`, or `rgb` + `color_temp` (in kelvin, 2000–6535 K). Transitions are honoured.
-- A **Release to Govee** switch (config). ON stops streaming so the Govee app or govee2mqtt can take over. Commands are still stored.
-- A **Mode** sensor (diagnostic): `streaming`, `idle`, `released` or `error`. The error message is available as an attribute.
+- **One light per virtual light**, using the JSON schema. Supported modes follow the light's type: On/off (`onoff`), RGB (`rgb` + brightness), or White (`color_temp` in kelvin, 2700–6500 K, + brightness). Transitions are honoured.
+- A **Release to Govee** switch (config). ON stops driving the strip so the Govee app or govee2mqtt can take over. Commands are still stored.
+- A **Mode** sensor (diagnostic): `groups`, `per_led`, `idle`, `released` or `error`. Why the strip is in that mode (`reason`, `detail`) and any error are attributes.
 
 Topics, with `<base>` = `MQTT_BASE_TOPIC`:
 
@@ -121,7 +121,7 @@ Topics, with `<base>` = `MQTT_BASE_TOPIC`:
 | `<base>/status` | `online` / `offline` (retained; LWT) |
 | `<base>/light/<id>/set` · `/state` | HA JSON-schema command / retained state |
 | `<base>/device/<id>/release/set` · `/state` | `ON` / `OFF` |
-| `<base>/device/<id>/status` | `{"mode":…,"error":…,"sent_colors":…}` (retained) |
+| `<base>/device/<id>/status` | `{"mode":…,"reason":…,"detail":…,"error":…,"groups":…}` (retained) |
 | `<prefix>/<component>/<base>/<id>/config` | discovery |
 
 Renaming, editing or deleting a light in the UI updates or removes its HA entity. When the service starts, it also clears retained discovery configs under its node id for anything that no longer exists. Entity IDs come from the light/device IDs, so **export your config and import it on the deployed instance** to keep the same HA entities. Only run one instance per `MQTT_BASE_TOPIC` at a time. For a throwaway test, use a different base topic (e.g. `govee-zones-dev`) and delete that HA device afterwards.
@@ -131,13 +131,13 @@ Renaming, editing or deleting a light in the UI updates or removes its HA entity
 Works on phones (touch drag-select and brush-select, ▲▼ priority buttons).
 
 
-1. **Devices** → *Add strip*: name, IP (use a static DHCP lease), LED count. *Test* runs a chase.
-2. Open the strip. Each cell is one LED: the top shows the live output, the bottom bar shows which light(s) own it (striped where lights overlap).
-3. Drag across cells to select (shift-drag to add), then *New light from selection* or add/remove the selection from an existing light.
-4. **Identify** flashes a light's LEDs on the real strip. **Pixel finder** lights a single LED when you click a cell — use these to map indices to positions on the house.
+1. **Devices** → *Add strip*: name, IP (use a static DHCP lease), LED count, and the *Groups* settings (4 LEDs per group on the H805A; *How control works* on the Devices page explains them). *Test* runs a chase.
+2. Open the strip. Each cell is one LED: the top shows the live output, the bottom bar shows which light(s) own it (striped where lights overlap). Dividers mark the groups in both the strip and house views; a white dot marks groups showing the strip's real white.
+3. Drag across cells to select (selections snap to whole groups; tick *Fine* for single LEDs), then *New light* or add/remove the selection from an existing light. A light that doesn't line up with the groups shows how it's rounded.
+4. **Identify** blinks a light on the real strip (its groups, in group mode). **Pixel finder** lights a single LED when you click a cell (switching to per-LED while it runs) — use these to map indices to positions on the house.
 5. Reorder lights by dragging, or with ▲▼ on touch screens; the top of the list wins where lights overlap.
 6. **House view** (toggle *Strip / House*): *Edit outline*, optionally *Add house photo*, then tap along the roofline in LED order. LEDs are spread evenly between points; tap a point to pin it to its real LED number (find corners with the pixel finder). In the house view, drag to brush-select LEDs. The photo is stored in `DATA_DIR/backgrounds/` and isn't included in exports.
-7. **Release to Govee** stops streaming so the Govee app / govee2mqtt can run scenes. Light changes made while released are saved and applied when you turn it off again.
+7. **Release to Govee** stops driving the strip so the Govee app / govee2mqtt can run scenes. In group mode the lights stay as they are until you change them in the app. Light changes made while released are saved and applied when you turn it off again.
 8. *Export* / *Import* back up the device and light configuration as JSON.
 
 ## Protocol CLI (hardware verification)
@@ -147,6 +147,8 @@ pnpm cli fill 255 180 100 --ip 192.168.1.50 -n 60   # hold a color until Ctrl-C
 pnpm cli pixel 12 --ip 192.168.1.50 -n 60
 pnpm cli chase --ip 192.168.1.50 -n 60
 pnpm cli enable|disable|on|off --ip 192.168.1.50
+pnpm cli probe --round 2 --ip 192.168.1.50          # guided group-control probe (docs/segment-mode-testing.md)
+pnpm cli seg white 1-2 2700 --ip 192.168.1.50        # raw group commands (groups count from 1)
 pnpm cli --help
 ```
 
@@ -161,12 +163,14 @@ Open questions to check against the real strip (SPEC §9):
 
 ## Behavior notes
 
-- **Whites are mixed from RGB.** Razer mode can't drive the strip's white LEDs, so whites are dimmer than Govee's own and may look tinted. Use the strip page's *White balance* panel to correct the tint: show the test white, then toggle *Release to Govee* to compare against Govee's white.
+- **Groups vs per-LED.** In group mode (the normal mode) white is the strip's real white, changes glide over about half a second (firmware), and the strip keeps its lights if govee-zones stops. Per-LED mode is used for the pixel finder, test chase, lights set to *Use exact LEDs*, the *Per-LED only* setting, and strips with more than 24 groups; there, white is mixed from RGB. The strip page shows which mode is active and why.
+- **White balance** corrects RGB-mixed white (per-LED mode) and RGB colors. With group control, flip between *Show mixed white* and *Show real white* on the strip and adjust until they match.
 - Never binds UDP 4002, so it coexists with govee2mqtt on the same host. Devices are configured by IP only.
-- While this service is streaming, **govee2mqtt's reported state for the strip will be wrong**, and govee2mqtt effects are overwritten within one keepalive. Use *Release to Govee* for scenes.
-- When all lights turn off, each strip follows its *When all lights are off* setting: turn the strip off (default), hold black (stay in streaming mode), or release to the Govee app.
-- On startup, lights that were on resume streaming. A strip that was idle is left alone (nothing is sent), so a restart doesn't kill a Govee scene.
-- On clean shutdown (SIGINT/SIGTERM) every streaming strip exits explicitly. If the process crashes, the strip reverts to its Govee app effect within ~60 s.
+- While this service drives a strip, **govee2mqtt's reported state for it will be wrong**. Use *Release to Govee* for scenes.
+- When every light is off, the strip is turned off. The last look is stored on the strip while it's off, so turning it on from the Govee app brings it back.
+- On startup, lights that were on resume. A strip that was idle is left alone (nothing is sent), so a restart doesn't kill a Govee scene.
+- On clean shutdown (SIGINT/SIGTERM), group mode sends nothing (the lights stay on); per-LED mode exits explicitly and turns the strip off. If the process crashes in per-LED mode, the strip freezes on its last frame.
+- **Upgrading from an earlier version:** the config format changed (no migration in v0). Light types `rgb_ct` and `dimmable` are gone, and light defaults are now `{ "brightness": …, "look": { "kind": "rgb", "color": [r,g,b] } }` or `{ "kind": "white", "mireds": 154–370 }`. The service refuses to start on an old config and lists what to fix.
 
 ## Development
 

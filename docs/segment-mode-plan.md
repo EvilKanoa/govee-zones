@@ -1,6 +1,6 @@
 # Segment mode: implementation plan
 
-Status: **ready to build.** Two rounds of hardware probing on the real strip settled the
+Status: **built** (backend, MQTT and UI; hardware acceptance §3 of the testing plan still to run). Two rounds of hardware probing on the real strip settled the
 protocol and behaviour. The evidence is in [`segment-mode-results.md`](segment-mode-results.md),
 and the tests that lock it in are in [`segment-mode-testing.md`](segment-mode-testing.md).
 
@@ -241,10 +241,10 @@ Output: `before` (actions), `frame` (`'groups' | 'composite' | 'park' | null`),
 - **Pacing.** Group ticks are at least `GROUP_STEP_MS = 100` apart, including fade steps
   (F8: smooth with the firmware glide). Per-LED stays at 33 ms. A transition of 0 still glides
   < 0.5 s in group mode; that's documented, not worked around.
-- **Queueing.** Group datagrams aren't coalesced (one update is up to ~6 datagrams ≈ 90 ms of
-  pacing, which fits in a 100 ms step). Razer frames keep the `frame` coalesce key. When the
-  held mode changes, any queued datagrams of the other kind are dropped before `before` is
-  queued (supports I2).
+- **Queueing.** Group datagrams aren't coalesced (one update is up to ~3 datagrams ≈ 45 ms of
+  pacing, which fits in a 100 ms step). Razer frames keep the `frame` coalesce key. The per-IP
+  queue is FIFO and group frames are never generated while per-LED is held, so anything queued
+  before an `enable` goes out before it (I2). No queue dropping is needed.
 - **Per-LED keepalive.** Kept at `keepaliveMs` (2 s) even though no revert was seen within
   120 s (F16): it's cheap, and the revert time is unknown.
 - **Brightness pin.** `brightness_max` on entry and every 30 s, in both modes (F12). `enable` is
