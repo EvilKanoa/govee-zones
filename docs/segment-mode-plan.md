@@ -336,8 +336,8 @@ groups are always visible.
     the Govee app, and the strip keeps its lights even if govee-zones stops. Switches to per-LED
     control only for single-LED tools like the pixel finder."*
   - **Per-LED only.** *"Always controls single LEDs. Changes are instant, but white is mixed from
-    RGB (slightly off-color), and the strip stays in streaming mode, so the Govee app can't
-    control it until govee-zones releases it."*
+    RGB (slightly off-color), and if govee-zones stops, the strip freezes on its last frame
+    in streaming mode."*
 - **Lights that don't line up with groups** (radio, Automatic only):
   - **Round to whole groups** (default). *"Keeps real white and group control. A light's edge
     moves by at most 2 LEDs to the nearest group boundary."*
